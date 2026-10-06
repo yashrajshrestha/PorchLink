@@ -1,5 +1,5 @@
 """Email alerts over SMTP. Without SMTP settings it only prints, so local runs need no email setup."""
-import smtplib
+import smtplib, ssl
 from email.message import EmailMessage
 
 
@@ -27,7 +27,7 @@ class EmailAlerter:
         msg.set_content(body)
         try:
             with smtplib.SMTP(self.host, self.port, timeout=20) as s:
-                s.starttls()
+                s.starttls(context=ssl.create_default_context())  # verify the server's certificate
                 if self.user:
                     s.login(self.user, self.password or "")
                 s.send_message(msg)

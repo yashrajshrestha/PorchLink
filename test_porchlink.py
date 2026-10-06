@@ -1,5 +1,5 @@
 """Tests for rules and the poll -> store -> alert flow. Run: python3 -m unittest -v"""
-import unittest
+import ssl, unittest
 from datetime import datetime
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -117,6 +117,10 @@ class EmailTest(unittest.TestCase):
             self.assertTrue(EmailAlerter(self.ENV).send("subj", "body"))
         server = smtp.return_value.__enter__.return_value
         server.starttls.assert_called_once()
+        context = server.starttls.call_args.kwargs["context"]  # certificate checked: no MITM on the SMTP password
+        self.assertIsInstance(context, ssl.SSLContext)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
         server.login.assert_called_once_with("me@example.com", "x")
         msg = server.send_message.call_args[0][0]
         self.assertEqual((msg["To"], msg["Subject"]), ("care@example.com", "subj"))

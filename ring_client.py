@@ -95,7 +95,7 @@ def parse_event(raw, device_id):
     a = raw.get("attributes") or {}
     return {"id": raw["id"], "device_id": device_id, "start_ms": int(a.get("start") or 0),
             "end_ms": int(a.get("end") or a.get("start") or 0), "event_type": a.get("event_type", "unknown"),
-            "sub_type": a.get("sub_type")}
+            "sub_type": a.get("sub_type"), "source": "poll"}
 
 
 def parse_webhook(payload):
