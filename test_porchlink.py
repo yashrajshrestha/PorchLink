@@ -1,0 +1,135 @@
+"""Tests for rules and the poll -> store -> alert flow. Run: python3 -m unittest -v"""
+import unittest
+from datetime import datetime
+from unittest import mock
+from zoneinfo import ZoneInfo
+
+import app
+from alerts import EmailAlerter
+from ring_client import FakeRing, parse_event
+from rules import Settings, evaluate, format_alert, is_night
+from store import Store
+
+TZ = ZoneInfo("Asia/Kathmandu")
+
+
+def ms(y, mo, d, h, mi):
+    return int(datetime(y, mo, d, h, mi, tzinfo=TZ).timestamp() * 1000)
+
+
+def event(eid, start, length_s=20, device="dev1"):
+    return {"id": eid, "device_id": device, "start_ms": start, "end_ms": start + length_s * 1000, "event_type": "on_demand"}
+
+
+class CaptureAlerter:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, subject, body):
+        self.sent.append((subject, body))
+        return True
+
+
+class RulesTest(unittest.TestCase):
+    def test_night_window_wraps_midnight(self):
+        s = Settings(night_start=23, night_end=6)
+        self.assertTrue(is_night(23, s) and is_night(2, s))
+        self.assertFalse(is_night(6, s) or is_night(14, s))
+
+    def test_night_window_same_day(self):
+        s = Settings(night_start=1, night_end=5)
+        self.assertTrue(is_night(3, s))
+        self.assertFalse(is_night(0, s) or is_night(5, s))
+
+    def test_daytime_single_event_is_plain_activity(self):
+        ev = event("a", ms(2026, 10, 5, 14, 0))
+        self.assertEqual([k for k, _ in evaluate(ev, [ev["start_ms"]], None, Settings(), TZ)], ["activity"])
+
+    def test_no_alert_when_every_event_off_and_nothing_unusual(self):
+        ev = event("a", ms(2026, 10, 5, 14, 0))
+        self.assertEqual(evaluate(ev, [ev["start_ms"]], None, Settings(alert_every_event=False), TZ), [])
+
+    def test_night_event(self):
+        ev = event("a", ms(2026, 10, 5, 2, 14))
+        self.assertIn("night", [k for k, _ in evaluate(ev, [ev["start_ms"]], None, Settings(), TZ)])
+
+    def test_burst_fires_once_per_window(self):
+        s = Settings(burst_count=3, burst_minutes=30)
+        starts = [ms(2026, 10, 5, 14, m) for m in (0, 10, 20)]
+        third = event("c", starts[2])
+        self.assertIn("burst", [k for k, _ in evaluate(third, starts, None, s, TZ)])
+        fourth = event("d", ms(2026, 10, 5, 14, 25))
+        kinds = [k for k, _ in evaluate(fourth, starts + [fourth["start_ms"]], starts[2], s, TZ)]
+        self.assertNotIn("burst", kinds)  # already alerted inside this window
+
+    def test_events_outside_window_do_not_count(self):
+        s = Settings(burst_count=3, burst_minutes=30)
+        starts = [ms(2026, 10, 5, 13, 0), ms(2026, 10, 5, 14, 0), ms(2026, 10, 5, 14, 10)]
+        ev = event("c", starts[2])
+        self.assertNotIn("burst", [k for k, _ in evaluate(ev, starts, None, s, TZ)])
+
+    def test_format_alert(self):
+        ev = event("a", ms(2026, 10, 5, 2, 14), length_s=20)
+        subject, body = format_alert(ev, "Front Door", [("night", "Unusual night-time activity at 02:14.")], TZ)
+        self.assertEqual(subject, "PorchLink: Unusual activity at Front Door, 02:14 AM")
+        self.assertIn("How long: 20 seconds", body)
+
+
+class FlowTest(unittest.TestCase):
+    def setUp(self):
+        self.store, self.alerter = Store(":memory:"), CaptureAlerter()
+
+    def test_startup_poll_records_without_alerting_then_new_event_alerts(self):
+        ring = FakeRing(every=1)
+        self.assertEqual(app.poll_once(ring, self.store, self.alerter, Settings(), TZ, alert_new=False), 1)
+        self.assertEqual(self.alerter.sent, [])
+        self.assertEqual(app.poll_once(ring, self.store, self.alerter, Settings(), TZ), 1)
+        self.assertEqual(len(self.alerter.sent), 1)
+
+    def test_same_event_is_not_alerted_twice(self):
+        ring = FakeRing(every=2)  # second poll adds one event, third poll returns it again
+        for _ in range(3):
+            app.poll_once(ring, self.store, self.alerter, Settings(), TZ)
+        self.assertEqual(len(self.alerter.sent), 1)
+
+    def test_burst_through_store(self):
+        s = Settings(burst_count=3, burst_minutes=30)
+        kinds = []
+        for i, m in enumerate((0, 5, 10, 15)):
+            ev = event(f"e{i}", ms(2026, 10, 5, 14, m))
+            self.store.add_event(ev, "Front Door")
+            app.handle_event(ev, "Front Door", self.store, self.alerter, s, TZ)
+            kinds.append(self.alerter.sent[-1][0])
+        self.assertTrue(kinds[2].startswith("PorchLink: Unusual activity"))   # 3rd event: burst
+        self.assertTrue(kinds[3].startswith("PorchLink: Activity"))           # 4th: no repeat burst
+
+    def test_parse_real_event_shape(self):
+        raw = {"type": "history-events", "id": "ava1.x", "attributes": {
+            "start": 1791193259621, "end": 1791193279829, "event_type": "on_demand"}}
+        self.assertEqual(parse_event(raw, "dev1")["end_ms"] - parse_event(raw, "dev1")["start_ms"], 20208)
+
+
+class EmailTest(unittest.TestCase):
+    ENV = {"SMTP_HOST": "smtp.example.com", "SMTP_USER": "me@example.com", "SMTP_PASSWORD": "x", "ALERT_TO": "care@example.com"}
+
+    def test_sends_over_starttls(self):
+        with mock.patch("alerts.smtplib.SMTP") as smtp, mock.patch("builtins.print"):
+            self.assertTrue(EmailAlerter(self.ENV).send("subj", "body"))
+        server = smtp.return_value.__enter__.return_value
+        server.starttls.assert_called_once()
+        server.login.assert_called_once_with("me@example.com", "x")
+        msg = server.send_message.call_args[0][0]
+        self.assertEqual((msg["To"], msg["Subject"]), ("care@example.com", "subj"))
+
+    def test_smtp_failure_returns_false(self):
+        with mock.patch("alerts.smtplib.SMTP", side_effect=OSError("down")), mock.patch("builtins.print"):
+            self.assertFalse(EmailAlerter(self.ENV).send("subj", "body"))
+
+    def test_not_configured_prints_only(self):
+        with mock.patch("alerts.smtplib.SMTP") as smtp, mock.patch("builtins.print"):
+            self.assertFalse(EmailAlerter({}).send("subj", "body"))
+        smtp.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

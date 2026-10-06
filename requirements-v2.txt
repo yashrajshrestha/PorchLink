@@ -1,0 +1,6 @@
+aiortc==1.15.0
+aiohttp
+pillow
+numpy
+boto3
+paho-mqtt

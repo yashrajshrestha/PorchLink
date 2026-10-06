@@ -1,0 +1,7 @@
+.env
+*.db
+__pycache__/
+spike_results.json
+.venv/
+*.jpg
+!sim/images/*.jpg

@@ -1,0 +1,18 @@
+{
+  "description": "Late evening: a visitor rings, a package arrives, then a burst of back-yard motion after 23:00.",
+  "timezone": "Asia/Kathmandu",
+  "start_at": "22:50",
+  "devices": [
+    {"id": "sim.device.front", "name": "Front Door"},
+    {"id": "sim.device.back", "name": "Back Yard"}
+  ],
+  "events": [
+    {"at_s": 0,    "device": "sim.device.front", "type": "motion_detected", "sub_type": "human", "duration_s": 15, "image": "../images/person.jpg"},
+    {"at_s": 120,  "device": "sim.device.front", "type": "button_press", "duration_s": 10, "image": "../images/person.jpg"},
+    {"at_s": 900,  "device": "sim.device.front", "type": "motion_detected", "sub_type": "human", "duration_s": 20, "image": "../images/package.jpg"},
+    {"at_s": 1200, "device": "sim.device.back",  "type": "motion_detected", "duration_s": 20, "image": "../images/empty_porch.jpg"},
+    {"at_s": 1260, "device": "sim.device.back",  "type": "motion_detected", "duration_s": 20, "image": "../images/vehicle.jpg"},
+    {"at_s": 1320, "device": "sim.device.back",  "type": "motion_detected", "sub_type": "human", "duration_s": 20, "image": "../images/person.jpg"},
+    {"at_s": 3000, "device": "sim.device.front", "type": "on_demand", "duration_s": 20}
+  ]
+}
