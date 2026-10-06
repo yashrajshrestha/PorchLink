@@ -3,17 +3,22 @@
 Run: python3 -m unittest test_sim -v
 """
 import json, os, threading, unittest, urllib.error, urllib.request
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 import app
+import web
 from rules import Settings
 from ring_client import RingClient, TokenExpired
 from sim.fake_ring_server import FakeRing, make_server
 from store import Store
+from webhooks import parse_webhook, verify_signature
+from worker import EventWorker
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCENARIO = os.path.join(HERE, "sim", "scenarios", "night_visit.json")
 TZ = ZoneInfo("Asia/Kathmandu")
+SECRET = "sim-secret"
 
 
 class CaptureAlerter:
@@ -72,6 +77,16 @@ class FakeServerTest(SimTestCase):
         status, ctype, data = self.post(path, {"type": "at_timestamp", "timestamp": ev["start"] + 1000})
         self.assertEqual((status, ctype, data[:2]), (200, "image/jpeg", b"\xff\xd8"))  # JPEG magic bytes
 
+    def test_webhooks_are_real_shape_and_signed(self):
+        self.start()
+        e = next(x for x in self.fake.events if x["type"] == "button_press")
+        [(body, signature, forged)] = self.fake.deliveries(e, SECRET)  # no chaos: exactly one delivery
+        self.assertFalse(forged)
+        self.assertTrue(verify_signature(SECRET, body, signature))
+        ev = parse_webhook(json.loads(body))
+        self.assertEqual((ev["id"], ev["device_id"], ev["start_ms"], ev["event_type"]),
+                         (f"webhook:{e['request_id']}", e["device"], e["start"], "button_press"))
+
 
 class AppAgainstSimTest(SimTestCase):
     def setUp(self):
@@ -83,35 +98,62 @@ class AppAgainstSimTest(SimTestCase):
 
     def test_rules_fire_for_scenario(self):
         ring = self.start()
-        app.poll_once(ring, self.store, self.alerter, Settings(), TZ)
+        worker = EventWorker(self.store, app.make_process(self.store, self.alerter, Settings(), TZ))
+        app.poll_once(ring, self.store, worker.handle)
         subjects = " | ".join(self.alerter.sent)
         self.assertEqual(len(self.alerter.sent), 7)
         self.assertIn("Doorbell at Front Door", subjects)      # 22:52 button_press
         self.assertIn("Person at Front Door", subjects)        # 22:50 motion human
         self.assertIn("Unusual activity at Back Yard", subjects)  # after 23:00, plus a burst of 3
 
-    def test_monkey_chaos_every_event_alerts_once(self):
+    def test_monkey_chaos_every_event_handled_once(self):
+        """Injected 500s, duplicated and shuffled history, Ring-style webhook re-deliveries and forged webhooks.
+        Poll and signed webhooks race through the real endpoint into one worker: every door event is handled
+        exactly once, by exactly one route, and every forgery is refused."""
         ring = self.start(chaos=0.5)
-        on_webhook = app.make_webhook_handler(ring, self.store, self.alerter, Settings(), TZ)
-        errors = 0
-        for _ in range(40):
+        worker = EventWorker(self.store, app.make_process(self.store, self.alerter, Settings(), TZ),
+                             name_for=app.DeviceNames(ring)).start()
+        server = web.make_server(self.store, TZ, 0, worker.submit, None, SECRET)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}/webhook"
+
+        def post(body, signature):
+            req = urllib.request.Request(url, data=body, method="POST",
+                                         headers={"Content-Type": "application/json", "X-Signature": signature})
             try:
-                app.poll_once(ring, self.store, self.alerter, Settings(), TZ)
-            except RuntimeError:
-                errors += 1  # injected 500s: the real loop logs these and polls again
-            for e in self.fake.due_webhooks():
-                for _ in range(2):  # every webhook delivered twice, racing the poller
-                    try:
-                        on_webhook(self.fake.webhook_payload(e))
-                    except RuntimeError:
-                        errors += 1  # device lookup hit an injected 500; the next delivery retries
-        self.fake.chaos = 0
-        app.poll_once(ring, self.store, self.alerter, Settings(), TZ)  # quiet poll picks up anything missed
-        self.assertGreater(errors, 0, "chaos should have injected some failures")
-        per_event = self.alerts_per_event()
-        self.assertEqual(set(per_event), {e["id"] for e in self.fake.events})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    return r.status
+            except urllib.error.HTTPError as e:
+                return e.code
+
+        forged = 0
+        with mock.patch("builtins.print"):
+            for _ in range(40):
+                try:
+                    app.poll_once(ring, self.store, worker.submit)
+                except RuntimeError:
+                    pass  # devices() hit an injected 500: the real loop logs it and polls again
+                for e in self.fake.due_webhooks():
+                    for body, signature, is_forged in self.fake.deliveries(e, SECRET):
+                        self.assertEqual(post(body, signature), 401 if is_forged else 200)
+                        forged += is_forged
+            self.assertTrue(worker.drain(10))
+            self.fake.chaos = 0
+            app.poll_once(ring, self.store, worker.submit)  # quiet poll picks up anything missed
+            self.assertTrue(worker.drain(10))
+
+        self.assertGreater(self.fake.injected_failures, 0, "chaos should have injected some failures")
+        self.assertGreater(forged, 0, "chaos should have sent some forged webhooks")
+        status = dict(self.store.db.execute("SELECT id, status FROM events").fetchall())
+        self.assertFalse({"pending", "failed"} & set(status.values()), status)
+        for e in self.fake.events:  # each physical event: handled once, by the poll or by its webhook
+            routes = [status.get(e["id"]), status.get(f"webhook:{e['request_id']}")]
+            self.assertEqual(routes.count("done"), 1, (e["id"], routes))
+        self.assertNotIn("forged", " ".join(status))  # forgeries never reach the store
         self.assertEqual(len(self.alerter.sent), len(self.fake.events))  # one email per event, no repeats
-        for kinds, rows in per_event.values():
+        for kinds, rows in self.alerts_per_event().values():
             self.assertEqual(kinds, rows)  # no alert kind recorded twice for the same event
 
 

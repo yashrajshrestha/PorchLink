@@ -6,9 +6,10 @@ from zoneinfo import ZoneInfo
 
 import app
 from alerts import EmailAlerter
-from ring_client import FakeRing, parse_event
+from ring_client import FakeRing, TokenExpired, parse_event
 from rules import Settings, evaluate, format_alert, is_night
 from store import Store
+from worker import EventWorker
 
 TZ = ZoneInfo("Asia/Kathmandu")
 
@@ -78,27 +79,30 @@ class RulesTest(unittest.TestCase):
 class FlowTest(unittest.TestCase):
     def setUp(self):
         self.store, self.alerter = Store(":memory:"), CaptureAlerter()
+        self.worker = EventWorker(self.store, app.make_process(self.store, self.alerter, Settings(), TZ))
+
+    def poll(self, ring, **kw):
+        return app.poll_once(ring, self.store, self.worker.handle, **kw)  # handle = synchronous submit
 
     def test_startup_poll_records_without_alerting_then_new_event_alerts(self):
         ring = FakeRing(every=1)
-        self.assertEqual(app.poll_once(ring, self.store, self.alerter, Settings(), TZ, alert_new=False), 1)
+        self.assertEqual(self.poll(ring, alert_new=False), 1)
         self.assertEqual(self.alerter.sent, [])
-        self.assertEqual(app.poll_once(ring, self.store, self.alerter, Settings(), TZ), 1)
+        self.assertEqual(self.poll(ring), 1)
         self.assertEqual(len(self.alerter.sent), 1)
 
     def test_same_event_is_not_alerted_twice(self):
         ring = FakeRing(every=2)  # second poll adds one event, third poll returns it again
         for _ in range(3):
-            app.poll_once(ring, self.store, self.alerter, Settings(), TZ)
+            self.poll(ring)
         self.assertEqual(len(self.alerter.sent), 1)
 
     def test_burst_through_store(self):
         s = Settings(burst_count=3, burst_minutes=30)
+        worker = EventWorker(self.store, app.make_process(self.store, self.alerter, s, TZ))
         kinds = []
         for i, m in enumerate((0, 5, 10, 15)):
-            ev = event(f"e{i}", ms(2026, 10, 5, 14, m))
-            self.store.add_event(ev, "Front Door")
-            app.handle_event(ev, "Front Door", self.store, self.alerter, s, TZ)
+            worker.handle({**event(f"e{i}", ms(2026, 10, 5, 14, m)), "source": "poll"}, "Front Door")
             kinds.append(self.alerter.sent[-1][0])
         self.assertTrue(kinds[2].startswith("PorchLink: Unusual activity"))   # 3rd event: burst
         self.assertTrue(kinds[3].startswith("PorchLink: Activity"))           # 4th: no repeat burst
@@ -107,6 +111,45 @@ class FlowTest(unittest.TestCase):
         raw = {"type": "history-events", "id": "ava1.x", "attributes": {
             "start": 1791193259621, "end": 1791193279829, "event_type": "on_demand"}}
         self.assertEqual(parse_event(raw, "dev1")["end_ms"] - parse_event(raw, "dev1")["start_ms"], 20208)
+
+
+class PollIsolationTest(unittest.TestCase):
+    class TwoDoors:
+        def __init__(self, failure):
+            self.failure = failure
+
+        def devices(self):
+            return [{"id": "a", "attributes": {"name": "A"}}, {"id": "b", "attributes": {"name": "B"}}]
+
+        def events(self, device_id):
+            if device_id == "a":
+                raise self.failure
+            return [{"type": "history-events", "id": "b-1",
+                     "attributes": {"start": 1000, "end": 2000, "event_type": "motion_detected"}}]
+
+    def test_one_failing_device_does_not_stop_the_others(self):
+        submitted = []
+        with mock.patch("builtins.print"):
+            n = app.poll_once(self.TwoDoors(RuntimeError("Ring API 500")), Store(":memory:"),
+                              lambda ev, name: submitted.append((ev["id"], name)))
+        self.assertEqual((n, submitted), (1, [("b-1", "B")]))
+
+    def test_expired_token_still_stops_polling(self):
+        with self.assertRaises(TokenExpired):
+            app.poll_once(self.TwoDoors(TokenExpired("expired")), Store(":memory:"), lambda ev, name: None)
+
+    def test_device_names_cache_and_fallback(self):
+        ring = self.TwoDoors(None)
+        names = app.DeviceNames(ring)
+        self.assertEqual(names({"device_id": "b"}), "B")
+
+        class Down:
+            def devices(self):
+                raise RuntimeError("Ring API 500")
+
+        with mock.patch("builtins.print"):
+            self.assertEqual(app.DeviceNames(Down())({"device_id": "ava1.ring.device.ABC123"}),
+                             "Ring device ...ABC123")
 
 
 class EmailTest(unittest.TestCase):

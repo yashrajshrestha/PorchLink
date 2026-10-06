@@ -64,16 +64,6 @@ class Store:
         with self.lock, self.db:
             self.db.execute("UPDATE events SET description=? WHERE id=?", (text, event_id))
 
-    def add_event(self, ev, name):
-        """Insert an event; return True only if it was new. Poller and webhooks both call this,
-        so the primary key is what stops a double alert."""
-        with self.lock, self.db:
-            cur = self.db.execute(
-                "INSERT OR IGNORE INTO events (id, device_id, device_name, start_ms, end_ms, event_type, sub_type)"
-                " VALUES (?,?,?,?,?,?,?)",
-                (ev["id"], ev["device_id"], name, ev["start_ms"], ev["end_ms"], ev["event_type"], ev.get("sub_type")))
-            return cur.rowcount == 1
-
     _INSERT_EVENT = ("INSERT OR IGNORE INTO events (id, device_id, device_name, start_ms, end_ms, event_type, sub_type,"
                      " source, status, attempts) VALUES (?,?,?,?,?,?,?,?,?,?)")
 

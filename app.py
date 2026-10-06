@@ -11,9 +11,10 @@ from zoneinfo import ZoneInfo
 
 from alerts import EmailAlerter
 from bridge import Bridge, IotCorePublisher, LocalPublisher, MqttPublisher, VirtualDevices, describe_action, load_config
-from ring_client import FakeRing, RingClient, TokenExpired, device_name, parse_event, parse_webhook
+from ring_client import FakeRing, RingClient, TokenExpired, device_name, parse_event
 from rules import Settings, evaluate, format_alert
 from store import Store
+from worker import EventWorker
 import web
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -55,32 +56,53 @@ def handle_event(ev, name, store, alerter, settings, tz, describe=None, bridge=N
         store.add_alert(ev, kind, reason, delivered)
 
 
-def make_webhook_handler(ring, store, alerter, settings, tz, describe=None, bridge=None):
-    """Webhook events go through the same store + rules as polled ones, so one event alerts once."""
-    names = {}
+class DeviceNames:
+    """Device id -> name. Webhooks only carry the id; refresh from Ring on a miss, never raise."""
 
-    def on_webhook(payload):
-        ev = parse_webhook(payload)
-        if ev["device_id"] not in names:
-            names.update({d["id"]: device_name(d) for d in ring.devices()})
-        name = names.get(ev["device_id"], f"Ring device ...{ev['device_id'][-6:]}")
-        if store.add_event(ev, name):
-            handle_event(ev, name, store, alerter, settings, tz, describe, bridge)
-    return on_webhook
+    def __init__(self, ring):
+        self.ring, self.names = ring, {}
+
+    def __call__(self, ev):
+        device_id = ev["device_id"]
+        if device_id not in self.names:
+            try:
+                self.names.update({d["id"]: device_name(d) for d in self.ring.devices()})
+            except Exception as e:
+                print(f"(device names unavailable: {type(e).__name__}: {e})")
+        return self.names.get(device_id, f"Ring device ...{device_id[-6:]}")
 
 
-def poll_once(ring, store, alerter, settings, tz, alert_new=True, describe=None, bridge=None):
-    """Fetch every device's events, store new ones, alert on them (oldest first). Return count of new events."""
+def make_process(store, alerter, settings, tz, describe=None, bridge=None):
+    """The worker's per-event step: rules, home actions, email, records."""
+    def process(ev, name):
+        handle_event(ev, name, store, alerter, settings, tz, describe, bridge)
+    return process
+
+
+def poll_once(ring, store, submit, alert_new=True):
+    """Fetch every device's events (oldest first). Events not yet handled go to submit(ev, name), the
+    worker; on the first poll (alert_new=False) new ones are recorded as history without alerting.
+    One device failing is logged and skipped; an expired token stops everything.
+    Return how many events were seen for the first time."""
     new = 0
     for device in ring.devices():
         name = device_name(device)
-        events = sorted((parse_event(raw, device["id"]) for raw in ring.events(device["id"])),
-                        key=lambda e: e["start_ms"])
-        for ev in events:
-            if store.add_event(ev, name):
+        try:
+            raws = ring.events(device["id"])
+        except TokenExpired:
+            raise
+        except Exception as e:
+            print(f"poll error on {name}: {e}")
+            continue
+        for ev in sorted((parse_event(raw, device["id"]) for raw in raws), key=lambda e: e["start_ms"]):
+            if not alert_new:
+                new += store.record_history(ev, name)
+                continue
+            status = store.status(ev["id"])
+            if status is None:
                 new += 1
-                if alert_new:
-                    handle_event(ev, name, store, alerter, settings, tz, describe, bridge)
+            if status in (None, "failed", "pending"):  # the worker decides; it never handles an event twice
+                submit(ev, name)
     return new
 
 
@@ -122,11 +144,14 @@ def main():
                          daemon=True).start()
     bridge = Bridge(config, publisher, decide=decide, min_p=float(env.get("DECIDER_MIN_P", 0.8)))
 
-    on_webhook = make_webhook_handler(ring, store, alerter, settings, tz, describe, bridge)
-    threading.Thread(target=web.serve, args=(store, tz, int(env.get("WEB_PORT", 8080)), on_webhook, devices),
-                     daemon=True).start()
+    worker = EventWorker(store, make_process(store, alerter, settings, tz, describe, bridge),
+                         name_for=DeviceNames(ring)).start()
+    webhook_secret = env.get("RING_WEBHOOK_SECRET", "")
+    threading.Thread(target=web.serve, args=(store, tz, int(env.get("WEB_PORT", 8080)), worker.submit, devices,
+                                             webhook_secret), daemon=True).start()
     print(f"PorchLink | {'FAKE mode' if fake else 'Ring API'} | poll every {poll_seconds}s | "
           f"email {'ON -> ' + alerter.to if alerter.enabled else 'OFF (printing only)'} | "
+          f"webhooks {'signed' if webhook_secret else 'OFF (set RING_WEBHOOK_SECRET)'} | "
           f"vision {vision_backend + ' ' + describe.model if describe else 'OFF'} | Decider {decide.url if decide else 'OFF'} | "
           f"devices: {'virtual (local)' if devices else env.get('BRIDGE')}, {len(config['automations'])} automations")
 
@@ -134,8 +159,7 @@ def main():
     first = True
     while True:
         try:
-            n = poll_once(ring, store, alerter, settings, tz,
-                          alert_new=not first or env.get("ALERT_ON_STARTUP") == "1", describe=describe, bridge=bridge)
+            n = poll_once(ring, store, worker.submit, alert_new=not first or env.get("ALERT_ON_STARTUP") == "1")
             if first:
                 print(f"Startup: {n} existing event(s) recorded, no alerts sent for them.")
             first = False

@@ -98,18 +98,6 @@ def parse_event(raw, device_id):
             "sub_type": a.get("sub_type"), "source": "poll"}
 
 
-def parse_webhook(payload):
-    """Turn a webhook POST into an event. Ring documents the event types but not the full payload,
-    so accept either a JSON:API body ({"data": {...}}) or a flat one."""
-    data = payload.get("data", payload)
-    source = ((data.get("relationships") or {}).get("source") or {}).get("data") or {}
-    device_id = source.get("id") or payload.get("device_id") or (data.get("attributes") or {}).get("device_id")
-    if not device_id or not data.get("id"):
-        raise ValueError("webhook payload has no device id or event id")
-    raw = {**data, "attributes": {"event_type": data.get("type"), **(data.get("attributes") or {})}}
-    return parse_event(raw, device_id)
-
-
 def device_name(device):
     name = (device.get("attributes") or {}).get("name")
     return name or f"Ring device ...{device['id'][-6:]}"

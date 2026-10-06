@@ -61,7 +61,7 @@ A fake Ring Partner API that plays a scenario file, so you can test events the P
 
 ```bash
 # Terminal 1: start the app first, so it is ready for the first webhook
-RING_BASE_URL=http://127.0.0.1:9000 RING_TOKEN=sim-token python3 app.py
+RING_WEBHOOK_SECRET=sim-secret RING_BASE_URL=http://127.0.0.1:9000 RING_TOKEN=sim-token python3 app.py
 # Terminal 2: 60x speed (the 50-minute scenario plays in about 50 s), 20% injected faults
 python3 sim/fake_ring_server.py sim/scenarios/night_visit.json --speed 60 --chaos 0.2 \
     --webhook http://127.0.0.1:8080/webhook
@@ -71,14 +71,16 @@ python3 sim/fake_ring_server.py sim/scenarios/night_visit.json --speed 60 --chao
   `--token-ttl` makes every call return 401 after N seconds.
 - Snapshot requests follow the real body format and error codes; images come from `sim/images/`
   (real Pexels stock photos, see `sim/images/CREDITS.md`).
-- Assumption: real webhook payloads were not observed, so the sim sends a JSON:API body and the app
-  accepts JSON:API or flat payloads (`ring_client.parse_webhook`).
+- Webhooks follow Ring's documented shape and signature: `X-Signature: sha256=<HMAC-SHA256 of the raw body>` with
+  `RING_WEBHOOK_SECRET` (the app refuses unsigned or wrongly signed webhooks, and all webhooks while the secret is unset).
+  The id is `meta.request_id`, so Ring's re-deliveries are stored once, and a press seen by both the webhook and the
+  history poll is handled once (`worker.py`). Chaos mode also sends forged webhooks; the app answers them 401.
 - Write your own scenario: copy `sim/scenarios/night_visit.json` and edit `start_at` and `events`.
 
 ## Test
 
 ```bash
-python3 -m unittest test_porchlink test_sim test_vision test_bridge test_decider -v   # app, sim, chaos, Bedrock/Ollama/Decider/MQTT (stubbed), bridge
+python3 -m unittest test_porchlink test_sim test_vision test_bridge test_decider test_webhooks test_worker test_web -v   # app, sim, chaos, Bedrock/Ollama/Decider/MQTT (stubbed), bridge
 .venv/bin/python -m unittest test_grab_frame -v     # v2 frame grab (needs requirements-v2.txt)
 ```
 
@@ -109,7 +111,7 @@ so still do one `VISION=bedrock BRIDGE=iot` run before the demo.
 sudo apt install -y mosquitto mosquitto-clients
 curl -fsSL https://ollama.com/install.sh | sh && ollama pull qwen2.5vl:3b
 mosquitto_sub -t 'porchlink/#' -v                      # terminal 1: watch the light commands
-rm -f porchlink.db && RING_BASE_URL=http://127.0.0.1:9000 RING_TOKEN=sim-token \
+rm -f porchlink.db && RING_WEBHOOK_SECRET=sim-secret RING_BASE_URL=http://127.0.0.1:9000 RING_TOKEN=sim-token \
   VISION=ollama BRIDGE=mqtt .venv/bin/python app.py     # terminal 2
 .venv/bin/python sim/fake_ring_server.py sim/scenarios/night_visit.json --speed 60 \
   --webhook http://127.0.0.1:8080/webhook               # terminal 3

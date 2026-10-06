@@ -4,6 +4,9 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from bridge import describe_action
+from webhooks import parse_webhook, verify_signature
+
+MAX_WEBHOOK_BYTES = 65_536  # Ring webhooks are small; refuse anything bigger before reading it
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>PorchLink</title>
@@ -31,16 +34,37 @@ tick(); setInterval(tick,1000); setTimeout(()=>location.reload(),15000);
 </script></body></html>"""
 
 
-def serve(store, tz, port=8080, on_webhook=None, devices=None):
+def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret=""):
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            if self.path != "/webhook" or not on_webhook:
+            if self.path != "/webhook" or not enqueue:
                 return self._send(404, "text/plain", "not found")
+            if not webhook_secret:
+                return self._send(503, "text/plain", "webhook secret not configured")
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                return self._send(415, "text/plain", "expected application/json")
             try:
-                on_webhook(json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0))))
-            except (ValueError, KeyError) as e:
+                length = int(self.headers.get("Content-Length") or "")
+            except ValueError:
+                length = -1
+            if length < 0:
+                return self._send(400, "text/plain", "bad Content-Length")
+            if length > MAX_WEBHOOK_BYTES:
+                return self._send(413, "text/plain", "webhook too large")
+            body = self.rfile.read(length)
+            if not verify_signature(webhook_secret, body, self.headers.get("X-Signature")):
+                return self._send(401, "text/plain", "bad signature")
+            try:
+                payload = json.loads(body)
+                if not isinstance(payload, dict):
+                    raise ValueError("payload is not a JSON object")
+                ev = parse_webhook(payload)
+            except ValueError as e:
                 return self._send(400, "text/plain", f"bad webhook: {e}")
-            self._send(204, "text/plain", "")
+            if ev is not None:  # door event: the worker does the rest; Ring needs a 200 within 5 s
+                enqueue(ev, None)
+            self._send(200, "text/plain", "ok")
 
         def do_GET(self):
             if self.path == "/api/devices":
@@ -81,6 +105,10 @@ def serve(store, tz, port=8080, on_webhook=None, devices=None):
         return (f"<tr><td>{when}</td><td>{html.escape(e['device_name'] or '')}</td>"
                 f"<td>{secs} s</td><td>{alert}{seen}{acts}</td></tr>")
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+
+
+def serve(store, tz, port=8080, enqueue=None, devices=None, webhook_secret=""):
+    server = make_server(store, tz, port, enqueue, devices, webhook_secret)
     print(f"Dashboard: http://127.0.0.1:{port}")
     server.serve_forever()

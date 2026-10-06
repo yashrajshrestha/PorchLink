@@ -7,6 +7,7 @@ import app
 from bridge import Bridge, IotCorePublisher, LocalPublisher, MqttPublisher, VirtualDevices, describe_action, load_config, matches
 from rules import Settings
 from store import Store
+from worker import EventWorker
 from test_sim import TZ, SimTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -225,7 +226,8 @@ class EndToEndTest(SimTestCase):
                 return True
 
         bridge = Bridge(CONFIG, LocalPublisher(devices))
-        app.poll_once(ring, store, Alerter(), Settings(), TZ, describe=describe, bridge=bridge)
+        worker = EventWorker(store, app.make_process(store, Alerter(), Settings(), TZ, describe=describe, bridge=bridge))
+        app.poll_once(ring, store, worker.handle)
 
         fired = store.db.execute("SELECT automation, COUNT(*) FROM actions GROUP BY automation").fetchall()
         fired = dict(fired)

@@ -8,6 +8,7 @@ from rules import Settings
 from store import Store
 from test_sim import TZ, CaptureAlerter, SimTestCase
 from vision import BedrockDescriber, OllamaDescriber
+from worker import EventWorker
 
 
 class StubBedrock:
@@ -50,7 +51,8 @@ class DescribeTest(SimTestCase):
         ring = self.start()
         store, alerter = Store(":memory:"), BodyAlerter()
         describe = BedrockDescriber(ring, {}, client=bedrock)
-        app.poll_once(ring, store, alerter, Settings(), TZ, describe=describe)
+        worker = EventWorker(store, app.make_process(store, alerter, Settings(), TZ, describe=describe))
+        app.poll_once(ring, store, worker.handle)
         return store, alerter
 
     def test_description_in_email_and_store(self):
