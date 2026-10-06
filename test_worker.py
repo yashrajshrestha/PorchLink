@@ -136,6 +136,57 @@ class WorkerTest(unittest.TestCase):
     def test_unknown_event_has_no_status(self):
         self.assertIsNone(self.store.status("nope"))
 
+    def test_finish_done_raises_returns_failed(self):
+        """If store.finish("done") raises, handle returns "failed" without re-raising."""
+        class FailingStore(Store):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.finish_done_count = 0
+            def finish(self, event_id, status):
+                if status == "done":
+                    self.finish_done_count += 1
+                    if self.finish_done_count == 1:
+                        raise sqlite3.OperationalError("database is locked")
+                return super().finish(event_id, status)
+
+        store = FailingStore(":memory:")
+        quiet = mock.patch("builtins.print")
+        quiet.start()
+        self.addCleanup(quiet.stop)
+
+        rec = Recorder()
+        w = EventWorker(store, rec)
+        result = w.handle(ev("e1"), "Front")
+        self.assertEqual(result, "failed")
+        self.assertEqual(rec.calls, [("e1", "Front")])
+        self.assertEqual(store.status("e1"), "pending")  # stays pending, will retry
+
+    def test_thread_survives_failing_finish(self):
+        """Worker thread survives if store.finish fails and processes later events."""
+        class FailOnFirstStore(Store):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.finish_count = 0
+            def finish(self, event_id, status):
+                self.finish_count += 1
+                if self.finish_count == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                return super().finish(event_id, status)
+
+        store = FailOnFirstStore(":memory:")
+        quiet = mock.patch("builtins.print")
+        quiet.start()
+        self.addCleanup(quiet.stop)
+
+        rec = Recorder()
+        w = EventWorker(store, rec).start()
+        w.submit(ev("e1", 1_000_000))
+        w.submit(ev("e2", 2_000_000))
+        self.assertTrue(w.drain(5))
+        # First event failed to finish, second event should have been processed
+        self.assertEqual(len(rec.calls), 2)
+        self.assertEqual([call[0] for call in rec.calls], ["e1", "e2"])
+
 
 class MigrationTest(unittest.TestCase):
     def test_rows_from_an_old_database_count_as_done(self):

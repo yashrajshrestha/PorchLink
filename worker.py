@@ -26,6 +26,8 @@ class EventWorker:
             ev, name = self.queue.get()
             try:
                 self.handle(ev, name)
+            except Exception as e:
+                print(f"worker error on {ev.get('id')}: {type(e).__name__}: {e}")
             finally:
                 self.queue.task_done()
 
@@ -54,5 +56,9 @@ class EventWorker:
             except Exception:
                 pass
             return "failed"
-        self.store.finish(ev["id"], "done")
+        try:
+            self.store.finish(ev["id"], "done")
+        except Exception as e:
+            print(f"event {ev.get('id')} failed to finish: {type(e).__name__}: {e}")
+            return "failed"
         return "done"
