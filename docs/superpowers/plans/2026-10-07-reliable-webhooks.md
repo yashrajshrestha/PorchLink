@@ -1137,7 +1137,7 @@ Run the full suite. Expected: `OK`. The count is about 75 + 6 (`test_web`) + 3 (
 Then a manual smoke check, from the repo root:
 1. Start the simulator and app in two terminals:
    - `python3 sim/fake_ring_server.py sim/scenarios/night_visit.json --speed 600 --chaos 0.3 --webhook http://127.0.0.1:8080/webhook`
-   - `RING_WEBHOOK_SECRET=sim-secret RING_BASE_URL=http://127.0.0.1:9000 RING_TOKEN=sim-token POLL_SECONDS=2 ALERT_ON_STARTUP=1 DB_PATH=/tmp/porchlink-smoke.db python3 app.py` (start this one first; `ALERT_ON_STARTUP=1` so the first poll alerts too, and a throwaway database)
+   - `RING_WEBHOOK_SECRET=sim-secret RING_BASE_URL=http://127.0.0.1:9000 RING_TOKEN=sim-token POLL_SECONDS=2 ALERT_ON_STARTUP=1 DB_PATH=/private/tmp/claude-501/-Users-yashshrestha-PorchLink/4dfb8f6f-1716-4c7a-8198-db858d5f9f4d/scratchpad/porchlink-smoke.db python3 app.py` (start this one first; `ALERT_ON_STARTUP=1` so the first poll alerts too, and a throwaway database)
 2. Let them run about 15 s.
 3. Expected:
    - the simulator prints `forged webhook refused: HTTP 401` at least once;
