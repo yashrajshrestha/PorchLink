@@ -12,10 +12,18 @@ class EventWorker:
     def __init__(self, store, process, name_for=None, max_attempts=3):
         self.store, self.process, self.name_for, self.max_attempts = store, process, name_for, max_attempts
         self.queue = queue.Queue()
+        self.inflight, self.inflight_lock = set(), threading.Lock()  # ids queued or being handled
 
     def submit(self, ev, name=None):
-        """Queue an event; name None means look it up (webhooks only carry the device id)."""
+        """Queue an event; name None means look it up (webhooks only carry the device id). An event that is
+        already queued or in flight is not queued again (so retries stay spaced by the poll interval);
+        returns whether it was queued."""
+        with self.inflight_lock:
+            if ev["id"] in self.inflight:
+                return False
+            self.inflight.add(ev["id"])
         self.queue.put((ev, name))
+        return True
 
     def start(self):
         threading.Thread(target=self._run, name="porchlink-worker", daemon=True).start()
@@ -29,6 +37,8 @@ class EventWorker:
             except Exception as e:
                 print(f"worker error on {ev.get('id')}: {type(e).__name__}: {e}")
             finally:
+                with self.inflight_lock:
+                    self.inflight.discard(ev.get("id"))
                 self.queue.task_done()
 
     def drain(self, timeout=5):

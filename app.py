@@ -79,9 +79,11 @@ def make_process(store, alerter, settings, tz, describe=None, bridge=None):
     return process
 
 
-def poll_once(ring, store, submit, alert_new=True):
+def poll_once(ring, store, submit, alert_new=True, seeded=None):
     """Fetch every device's events (oldest first). Events not yet handled go to submit(ev, name), the
-    worker; on the first poll (alert_new=False) new ones are recorded as history without alerting.
+    worker. History is recorded without alerting (alert_new=False for every device, or, when `seeded` is a
+    set, for each device the first time its events are fetched successfully: its id is then added to
+    `seeded`, so a device that failed on the first poll is seeded later and never floods old alerts).
     One device failing is logged and skipped; an expired token stops everything.
     Return how many events were seen for the first time."""
     new = 0
@@ -94,15 +96,22 @@ def poll_once(ring, store, submit, alert_new=True):
         except Exception as e:
             print(f"poll error on {name}: {e}")
             continue
+        record_only = (device["id"] not in seeded) if seeded is not None else not alert_new
+        recorded = 0
         for ev in sorted((parse_event(raw, device["id"]) for raw in raws), key=lambda e: e["start_ms"]):
-            if not alert_new:
-                new += store.record_history(ev, name)
+            if record_only:
+                recorded += store.record_history(ev, name)
                 continue
             status = store.status(ev["id"])
             if status is None:
                 new += 1
             if status in (None, "failed", "pending"):  # the worker decides; it never handles an event twice
                 submit(ev, name)
+        if seeded is not None and record_only:
+            seeded.add(device["id"])
+            if recorded:
+                print(f"Recorded {recorded} existing event(s) for {name} without alerts.")
+        new += recorded
     return new
 
 
@@ -155,14 +164,12 @@ def main():
           f"vision {vision_backend + ' ' + describe.model if describe else 'OFF'} | Decider {decide.url if decide else 'OFF'} | "
           f"devices: {'virtual (local)' if devices else env.get('BRIDGE')}, {len(config['automations'])} automations")
 
-    # First poll only records existing history, so a restart does not re-send old alerts.
-    first = True
+    # Each device's first successful poll only records its existing history, so a restart does not re-send old
+    # alerts, even when one device fails on the first poll and is seeded later.
+    seeded = None if env.get("ALERT_ON_STARTUP") == "1" else set()
     while True:
         try:
-            n = poll_once(ring, store, worker.submit, alert_new=not first or env.get("ALERT_ON_STARTUP") == "1")
-            if first:
-                print(f"Startup: {n} existing event(s) recorded, no alerts sent for them.")
-            first = False
+            poll_once(ring, store, worker.submit, seeded=seeded)
         except TokenExpired:
             sys.exit("\nRing token expired. Generate a new one in the Playground and restart with the new RING_TOKEN.")
         except Exception as e:

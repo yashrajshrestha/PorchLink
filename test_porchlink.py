@@ -138,6 +138,37 @@ class PollIsolationTest(unittest.TestCase):
         with self.assertRaises(TokenExpired):
             app.poll_once(self.TwoDoors(TokenExpired("expired")), Store(":memory:"), lambda ev, name: None)
 
+    class Flaky:
+        """Device a fails on its first events() call and succeeds afterwards; b always works (and grows)."""
+        def __init__(self):
+            self.a_calls, self.b_events = 0, [1000]
+
+        def devices(self):
+            return [{"id": "a", "attributes": {"name": "A"}}, {"id": "b", "attributes": {"name": "B"}}]
+
+        def events(self, device_id):
+            def raw(eid, start):
+                return {"type": "history-events", "id": eid,
+                        "attributes": {"start": start, "end": start + 1, "event_type": "motion_detected"}}
+            if device_id == "a":
+                self.a_calls += 1
+                if self.a_calls == 1:
+                    raise RuntimeError("Ring API 500")
+                return [raw("a-1", 1000), raw("a-2", 2000)]
+            return [raw(f"b-{s}", s) for s in self.b_events]
+
+    def test_device_failing_on_first_poll_is_seeded_later_not_alerted(self):
+        ring, store, submitted, seeded = self.Flaky(), Store(":memory:"), [], set()
+        submit = lambda ev, name: submitted.append(ev["id"])
+        with mock.patch("builtins.print"):
+            app.poll_once(ring, store, submit, seeded=seeded)
+            self.assertEqual((submitted, seeded, store.status("b-1000")), ([], {"b"}, "history"))
+            ring.b_events.append(3000)  # b gets a new event while a is still unseeded
+            app.poll_once(ring, store, submit, seeded=seeded)
+        self.assertEqual(submitted, ["b-3000"])  # a's old history is recorded, never submitted
+        self.assertEqual((store.status("a-1"), store.status("a-2")), ("history", "history"))
+        self.assertEqual(seeded, {"a", "b"})
+
     def test_device_names_cache_and_fallback(self):
         ring = self.TwoDoors(None)
         names = app.DeviceNames(ring)

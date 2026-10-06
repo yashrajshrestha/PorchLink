@@ -1,5 +1,5 @@
 """Tests for the event worker and per-event status in the store. Run: python3 -m unittest test_worker -v"""
-import os, sqlite3, tempfile, unittest
+import os, sqlite3, tempfile, threading, unittest
 from unittest import mock
 
 from store import Store
@@ -186,6 +186,54 @@ class WorkerTest(unittest.TestCase):
         # First event failed to finish, second event should have been processed
         self.assertEqual(len(rec.calls), 2)
         self.assertEqual([call[0] for call in rec.calls], ["e1", "e2"])
+
+
+class SubmitDedupeTest(unittest.TestCase):
+    def setUp(self):
+        self.store = Store(":memory:")
+        quiet = mock.patch("builtins.print")
+        quiet.start()
+        self.addCleanup(quiet.stop)
+
+    def blocker(self, calls, fail_ids=()):
+        """A process() that waits on self.gate for the event named "block", and fails for fail_ids."""
+        self.gate, self.entered = threading.Event(), threading.Event()
+
+        def process(e, name):
+            calls.append(e["id"])
+            if e["id"] == "block":
+                self.entered.set()
+                self.assertTrue(self.gate.wait(5))
+            if e["id"] in fail_ids:
+                raise RuntimeError("boom")
+        return process
+
+    def test_resubmitting_an_inflight_event_is_ignored(self):
+        calls = []
+        w = EventWorker(self.store, self.blocker(calls)).start()
+        results = [w.submit(ev("block"))]
+        self.assertTrue(self.entered.wait(5))
+        results += [w.submit(ev("block")), w.submit(ev("block"))]  # in flight: the worker is still inside process
+        self.gate.set()
+        self.assertTrue(w.drain(5))
+        self.assertEqual((results, calls), ([True, False, False], ["block"]))
+        self.assertTrue(w.submit(ev("block")))  # handled and released: submit works again (store says done)
+        self.assertTrue(w.drain(5))
+
+    def test_queued_copies_do_not_burn_all_retries_at_once(self):
+        calls = []
+        w = EventWorker(self.store, self.blocker(calls, fail_ids={"e1"})).start()
+        w.submit(ev("block"))
+        self.assertTrue(self.entered.wait(5))
+        self.assertEqual([w.submit(ev("e1")) for _ in range(3)], [True, False, False])
+        self.gate.set()
+        self.assertTrue(w.drain(5))
+        attempts = self.store.db.execute("SELECT attempts FROM events WHERE id='e1'").fetchone()[0]
+        self.assertEqual((calls.count("e1"), attempts, self.store.status("e1")), (1, 1, "failed"))
+        self.assertTrue(w.submit(ev("e1")))  # the next poll's resubmit is accepted: attempt 2
+        self.assertTrue(w.drain(5))
+        attempts = self.store.db.execute("SELECT attempts FROM events WHERE id='e1'").fetchone()[0]
+        self.assertEqual((calls.count("e1"), attempts), (2, 2))
 
 
 class MigrationTest(unittest.TestCase):
