@@ -28,24 +28,35 @@ def verify_signature(secret, body, header):
 def parse_webhook(payload):
     """Turn a Ring webhook body into an event, or None for non-door events (device online, etc.).
     Raises ValueError when a door event is missing what we need."""
+    if not isinstance(payload, dict):
+        raise ValueError("webhook payload is not a dict")
     data = payload.get("data")
     if not isinstance(data, dict):
         raise ValueError("webhook has no data object")
     kind = data.get("type")
-    if not kind:
+    if not isinstance(kind, str):
         raise ValueError("webhook has no data.type")
     if kind not in DOOR_EVENT_TYPES:
         return None
-    attrs = data.get("attributes") or {}
-    request_id = (payload.get("meta") or {}).get("request_id")
+    attrs = data.get("attributes")
+    if attrs is not None and not isinstance(attrs, dict):
+        raise ValueError("webhook attributes is not a dict")
+    attrs = attrs or {}
+    meta = payload.get("meta")
+    if meta is not None and not isinstance(meta, dict):
+        raise ValueError("webhook meta is not a dict")
+    meta = meta or {}
+    request_id = meta.get("request_id")
     source, timestamp = attrs.get("source"), attrs.get("timestamp")
     missing = [name for name, value in (("meta.request_id", request_id), ("attributes.source", source),
                                         ("attributes.timestamp", timestamp)) if value in (None, "")]
     if missing:
         raise ValueError("webhook is missing " + ", ".join(missing))
+    if isinstance(timestamp, bool):
+        raise ValueError("attributes.timestamp is not a number")
     try:
         start_ms = int(timestamp)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError("attributes.timestamp is not a number") from None
     return {"id": f"webhook:{request_id}", "device_id": str(source), "start_ms": start_ms, "end_ms": start_ms,
             "event_type": kind, "sub_type": attrs.get("sub_type") or None, "source": "webhook"}

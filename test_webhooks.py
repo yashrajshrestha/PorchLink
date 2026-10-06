@@ -70,9 +70,17 @@ class ParseTest(unittest.TestCase):
         no_time = real_payload()
         del no_time["data"]["attributes"]["timestamp"]
         bad_time = real_payload(timestamp="soon")
+        inf_time = real_payload(timestamp=float("inf"))
+        bool_time = real_payload(timestamp=True)
+        attr_string = {"data": {"type": "motion_detected", "attributes": "x"}, "meta": {"request_id": "req-123"}}
+        meta_string = {"data": {"type": "motion_detected", "attributes": {}}, "meta": "x"}
+        type_list = {"data": {"type": ["motion_detected"], "attributes": {}}, "meta": {"request_id": "req-123"}}
         for name, payload in {"no type": {"data": {"attributes": {}}}, "data not an object": {"data": []},
                               "no request_id": no_meta, "no source": no_source, "no timestamp": no_time,
-                              "timestamp not a number": bad_time}.items():
+                              "timestamp not a number": bad_time, "payload not a dict": [1],
+                              "data.type is a list": type_list, "attributes is a string": attr_string,
+                              "meta is a string": meta_string, "timestamp is inf": inf_time,
+                              "timestamp is bool": bool_time}.items():
             with self.assertRaises(ValueError, msg=name):
                 parse_webhook(payload)
 
