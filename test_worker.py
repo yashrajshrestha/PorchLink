@@ -1,0 +1,155 @@
+"""Tests for the event worker and per-event status in the store. Run: python3 -m unittest test_worker -v"""
+import os, sqlite3, tempfile, unittest
+from unittest import mock
+
+from store import Store
+from worker import DUPLICATE_WINDOW_MS, EventWorker
+
+
+def ev(eid, start=1_000_000, source="poll", device="dev1", kind="motion_detected"):
+    return {"id": eid, "device_id": device, "start_ms": start, "end_ms": start, "event_type": kind,
+            "sub_type": None, "source": source}
+
+
+class Recorder:
+    """A process() stand-in that records calls and fails the first `fail_times` of them."""
+
+    def __init__(self, fail_times=0):
+        self.calls, self.fail_times = [], fail_times
+
+    def __call__(self, e, name):
+        self.calls.append((e["id"], name))
+        if self.fail_times:
+            self.fail_times -= 1
+            raise RuntimeError("boom")
+
+
+class WorkerTest(unittest.TestCase):
+    def setUp(self):
+        self.store = Store(":memory:")
+        quiet = mock.patch("builtins.print")
+        quiet.start()
+        self.addCleanup(quiet.stop)
+
+    def test_window_constant(self):
+        self.assertEqual(DUPLICATE_WINDOW_MS, 15_000)
+
+    def test_new_event_is_processed_once(self):
+        rec = Recorder()
+        w = EventWorker(self.store, rec)
+        self.assertEqual(w.handle(ev("e1"), "Front"), "done")
+        self.assertIsNone(w.handle(ev("e1"), "Front"))
+        self.assertEqual(rec.calls, [("e1", "Front")])
+        self.assertEqual(self.store.status("e1"), "done")
+
+    def test_failure_is_retried_then_succeeds(self):
+        rec = Recorder(fail_times=1)
+        w = EventWorker(self.store, rec)
+        self.assertEqual(w.handle(ev("e1"), "Front"), "failed")
+        self.assertEqual(self.store.status("e1"), "failed")
+        self.assertEqual(w.handle(ev("e1"), "Front"), "done")
+        self.assertEqual(len(rec.calls), 2)
+
+    def test_gives_up_after_max_attempts(self):
+        rec = Recorder(fail_times=99)
+        w = EventWorker(self.store, rec, max_attempts=3)
+        self.assertEqual([w.handle(ev("e1"), "Front") for _ in range(5)], ["failed", "failed", "failed", None, None])
+        self.assertEqual(len(rec.calls), 3)
+
+    def test_crash_leftover_pending_is_retried(self):
+        self.store.begin(ev("e1"), "Front", 3)  # the process died mid-event: the row is stuck in pending
+        rec = Recorder()
+        self.assertEqual(EventWorker(self.store, rec).handle(ev("e1"), "Front"), "done")
+
+    def test_history_rows_never_alert_later(self):
+        self.assertTrue(self.store.record_history(ev("e1"), "Front"))
+        self.assertFalse(self.store.record_history(ev("e1"), "Front"))
+        rec = Recorder()
+        self.assertIsNone(EventWorker(self.store, rec).handle(ev("e1"), "Front"))
+        self.assertEqual((rec.calls, self.store.status("e1")), ([], "history"))
+
+    def test_same_press_webhook_then_poll_is_handled_once(self):
+        rec = Recorder()
+        w = EventWorker(self.store, rec)
+        self.assertEqual(w.handle(ev("webhook:req-1", 1_000_000, "webhook"), "Front"), "done")
+        self.assertEqual(w.handle(ev("hist-1", 1_005_000, "poll"), "Front"), "duplicate")
+        self.assertEqual(rec.calls, [("webhook:req-1", "Front")])
+
+    def test_same_press_poll_then_webhook_is_handled_once(self):
+        rec = Recorder()
+        w = EventWorker(self.store, rec)
+        self.assertEqual(w.handle(ev("hist-1", 1_005_000, "poll"), "Front"), "done")
+        self.assertEqual(w.handle(ev("webhook:req-1", 1_000_000, "webhook"), "Front"), "duplicate")
+
+    def test_failed_copy_does_not_hide_the_other_copy(self):
+        rec = Recorder(fail_times=1)
+        w = EventWorker(self.store, rec)
+        self.assertEqual(w.handle(ev("webhook:req-1", 1_000_000, "webhook"), "Front"), "failed")
+        self.assertEqual(w.handle(ev("hist-1", 1_000_000, "poll"), "Front"), "done")  # only a done copy dedupes
+
+    def test_events_20_seconds_apart_are_both_handled(self):
+        w = EventWorker(self.store, Recorder())
+        self.assertEqual(w.handle(ev("webhook:req-1", 1_000_000, "webhook"), "Front"), "done")
+        self.assertEqual(w.handle(ev("hist-1", 1_020_000, "poll"), "Front"), "done")
+
+    def test_same_source_never_dedupes(self):
+        w = EventWorker(self.store, Recorder())
+        self.assertEqual(w.handle(ev("webhook:req-1", 1_000_000, "webhook"), "Front"), "done")
+        self.assertEqual(w.handle(ev("webhook:req-2", 1_003_000, "webhook"), "Front"), "done")
+
+    def test_other_type_or_device_is_not_a_duplicate(self):
+        w = EventWorker(self.store, Recorder())
+        w.handle(ev("webhook:req-1", 1_000_000, "webhook"), "Front")
+        self.assertEqual(w.handle(ev("hist-1", 1_000_000, "poll", kind="button_press"), "Front"), "done")
+        self.assertEqual(w.handle(ev("hist-2", 1_000_000, "poll", device="dev2"), "Back"), "done")
+
+    def test_duplicates_do_not_count_toward_bursts_or_the_timeline(self):
+        w = EventWorker(self.store, Recorder())
+        w.handle(ev("webhook:req-1", 1_000_000, "webhook"), "Front")
+        w.handle(ev("hist-1", 1_000_000, "poll"), "Front")
+        self.assertEqual(self.store.starts_since("dev1", 0), [1_000_000])
+        self.assertEqual([e["id"] for e in self.store.timeline(0)], ["webhook:req-1"])
+
+    def test_name_for_fills_missing_names(self):
+        rec = Recorder()
+        w = EventWorker(self.store, rec, name_for=lambda e: "Front Door")
+        w.handle(ev("e1"), None)
+        self.assertEqual(rec.calls, [("e1", "Front Door")])
+        row = self.store.db.execute("SELECT device_name FROM events WHERE id='e1'").fetchone()
+        self.assertEqual(row[0], "Front Door")
+
+    def test_background_thread_drains_the_queue(self):
+        rec = Recorder()
+        w = EventWorker(self.store, rec).start()
+        for i in range(5):
+            w.submit(ev(f"e{i}", 1_000_000 + i * 60_000))
+        self.assertTrue(w.drain(5))
+        self.assertEqual(len(rec.calls), 5)
+
+    def test_thread_survives_a_failing_event(self):
+        w = EventWorker(self.store, Recorder(fail_times=1)).start()
+        w.submit(ev("e1"))
+        w.submit(ev("e2", 2_000_000))
+        self.assertTrue(w.drain(5))
+        self.assertEqual((self.store.status("e1"), self.store.status("e2")), ("failed", "done"))
+
+    def test_unknown_event_has_no_status(self):
+        self.assertIsNone(self.store.status("nope"))
+
+
+class MigrationTest(unittest.TestCase):
+    def test_rows_from_an_old_database_count_as_done(self):
+        path = os.path.join(tempfile.mkdtemp(), "old.db")
+        db = sqlite3.connect(path)
+        db.executescript("CREATE TABLE events (id TEXT PRIMARY KEY, device_id TEXT, device_name TEXT,"
+                         " start_ms INTEGER, end_ms INTEGER, event_type TEXT);"
+                         "INSERT INTO events VALUES ('old-1', 'dev1', 'Front', 1, 2, 'on_demand');")
+        db.commit()
+        db.close()
+        store = Store(path)
+        self.assertEqual(store.status("old-1"), "done")
+        self.assertFalse(store.begin(ev("old-1"), "Front", 3))
+
+
+if __name__ == "__main__":
+    unittest.main()
