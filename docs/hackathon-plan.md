@@ -5,6 +5,18 @@
 **Prizes we target:** Ring 1st $12K / 2nd $8K · AWS Builder mini challenge $5K + $5K credits (can win both)
 **Judging:** 4 equal criteria — Tech Implementation, Design, Potential Impact, Quality of Idea. Stage 1 is pass/fail (fits theme, really uses Ring APIs). Friction log = up to 10% bonus.
 
+## 0. Other entries from the same build
+
+| Hackathon | Deadline | Prize | What it adds |
+|---|---|---|---|
+| **Agent Experience Hackathon** (AWS Builder Center, [page](https://builder.aws.com/build/hackathons/4f50957c-1d08-37ab-b11c-97516b9adeb4/agent-experience-hackathon)) — "build a working agent on AWS, powered by Strands Decider 2B" | Oct 16–30, 2026 (page also says 16–23; confirm) | 3 × $5,000 AWS credits + swag | Decider becomes the decision step (picks the light pattern, not only "package yes/no") and runs **on AWS** (small GPU instance, ~$0.50/h, on only for testing + demo). Its own video. Submission rules "coming soon". |
+| OpenCV AI Competition 2026, powered by AWS | Oct 27, 12:30 | $5K/$3K/$2K + $1K Agentic Vision award | An OpenCV 5 step (crop Ring's watermark band, cheap "did anything change?" pre-filter before Bedrock), technical report, ≤5 min video, working endpoint. Optional. |
+
+**Decider work (folds into days 4–6 + 7–8):**
+1. Days 4–6: one Decider `choice` question per event — options `doorbell_flash`, `package_amber`, `vehicle_floodlight`, `stranger_all_rooms`, `nothing` — built from the Ring event + Nova's JSON description. Deterministic safety rules still win (a doorbell press always flashes). Measure accuracy on the labelled frames, including the "pizza box / cardboard sign → nothing" cases.
+2. Days 7–8: run `strands-decider serve` on an AWS GPU instance (g4dn/g5 class, stop it when idle), reached over HTTPS from PorchLink; record p50 latency (target < 1 s) and cost.
+3. Video: show the decision with its probability on screen, then the pizza box → nothing happens.
+
 ## 1. What problem PorchLink solves
 
 Ring's Partner API is **read-only**: it tells you what the camera saw, but cannot make anything happen. Ring's own Smart Alerts and Alexa Routines can turn a light on when motion fires, but they are coarse (any motion, any time) and tied to Alexa.
