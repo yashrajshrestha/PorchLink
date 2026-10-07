@@ -33,7 +33,8 @@ class Store:
                 except sqlite3.OperationalError:
                     pass
             # Event status (added for the worker). Rows from older databases count as done.
-            for column, kind in (("source", "TEXT"), ("status", "TEXT DEFAULT 'done'"), ("attempts", "INTEGER DEFAULT 0")):
+            for column, kind in (("source", "TEXT"), ("status", "TEXT DEFAULT 'done'"), ("attempts", "INTEGER DEFAULT 0"),
+                                 ("duplicate_of", "TEXT")):
                 try:
                     self.db.execute(f"ALTER TABLE events ADD COLUMN {column} {kind}")
                 except sqlite3.OperationalError:
@@ -83,9 +84,9 @@ class Store:
                 " WHERE id=? AND status IN ('failed', 'pending') AND attempts<?", (ev["id"], max_attempts))
             return cur.rowcount == 1
 
-    def finish(self, event_id, status):
+    def finish(self, event_id, status, duplicate_of=None):
         with self.lock, self.db:
-            self.db.execute("UPDATE events SET status=? WHERE id=?", (status, event_id))
+            self.db.execute("UPDATE events SET status=?, duplicate_of=? WHERE id=?", (status, duplicate_of, event_id))
 
     def record_history(self, ev, name):
         """Store an event seen on the first poll without alerting. True if it was new."""
@@ -93,13 +94,17 @@ class Store:
             return self.db.execute(self._INSERT_EVENT, self._event_row(ev, name, "history", 0)).rowcount == 1
 
     def find_duplicate(self, ev, window_ms):
-        """Id of an already-handled copy of the same press from the other route (poll vs webhook): same
-        device and type, within window_ms. Two events from the same route are never duplicates."""
+        """Id of the nearest already-handled copy of the same press from the other route (poll vs webhook):
+        same device and type, within window_ms. Two events from the same route are never duplicates, and a
+        handled event is claimed by at most one duplicate, so each physical event is handled once."""
         with self.lock:
             row = self.db.execute(
                 "SELECT id FROM events WHERE device_id=? AND event_type=? AND status='done' AND id<>?"
-                " AND COALESCE(source, '') <> ? AND ABS(start_ms - ?) <= ? LIMIT 1",
-                (ev["device_id"], ev["event_type"], ev["id"], ev.get("source") or "", ev["start_ms"], window_ms)).fetchone()
+                " AND COALESCE(source, '') <> ? AND ABS(start_ms - ?) <= ?"
+                " AND id NOT IN (SELECT duplicate_of FROM events WHERE duplicate_of IS NOT NULL)"
+                " ORDER BY ABS(start_ms - ?) LIMIT 1",
+                (ev["device_id"], ev["event_type"], ev["id"], ev.get("source") or "", ev["start_ms"], window_ms,
+                 ev["start_ms"])).fetchone()
         return row[0] if row else None
 
     def status(self, event_id):

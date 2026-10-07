@@ -31,6 +31,9 @@ class WorkerTest(unittest.TestCase):
         quiet.start()
         self.addCleanup(quiet.stop)
 
+    def duplicate_of(self, event_id):
+        return self.store.db.execute("SELECT duplicate_of FROM events WHERE id=?", (event_id,)).fetchone()[0]
+
     def test_window_constant(self):
         self.assertEqual(DUPLICATE_WINDOW_MS, 15_000)
 
@@ -74,12 +77,44 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(w.handle(ev("webhook:req-1", 1_000_000, "webhook"), "Front"), "done")
         self.assertEqual(w.handle(ev("hist-1", 1_005_000, "poll"), "Front"), "duplicate")
         self.assertEqual(rec.calls, [("webhook:req-1", "Front")])
+        self.assertEqual(self.store.status("hist-1"), "duplicate")
+        self.assertEqual(self.duplicate_of("hist-1"), "webhook:req-1")
 
     def test_same_press_poll_then_webhook_is_handled_once(self):
         rec = Recorder()
         w = EventWorker(self.store, rec)
         self.assertEqual(w.handle(ev("hist-1", 1_005_000, "poll"), "Front"), "done")
         self.assertEqual(w.handle(ev("webhook:req-1", 1_000_000, "webhook"), "Front"), "duplicate")
+
+    def test_three_events_through_both_routes_are_handled_once_each(self):
+        """p = poll copy, w = webhook copy of motion events at 0, 10 and 20 s: no copy may absorb two others."""
+        rec = Recorder()
+        w = EventWorker(self.store, rec)
+        for e in (ev("p0", 0, "poll"), ev("w0", 0, "webhook"), ev("w1", 10_000, "webhook"),
+                  ev("w2", 20_000, "webhook"), ev("p1", 10_000, "poll"), ev("p2", 20_000, "poll")):
+            w.handle(e, "Front")
+        rows = self.store.db.execute("SELECT id, status, duplicate_of FROM events").fetchall()
+        done = [r[0] for r in rows if r[1] == "done"]
+        dups = [r for r in rows if r[1] == "duplicate"]
+        self.assertEqual(len(done), 3)
+        self.assertEqual(len(dups), 3)
+        self.assertEqual(sorted(c[0] for c in rec.calls), sorted(done))  # each physical event handled once
+        self.assertEqual(len({r[2] for r in dups}), 3)  # each duplicate points at a distinct handled event
+        self.assertTrue(all(r[2] in done for r in dups))
+
+    def test_nearest_candidate_is_chosen(self):
+        w = EventWorker(self.store, Recorder())
+        self.assertEqual(w.handle(ev("hist-1", 1_000_000, "poll"), "Front"), "done")
+        self.assertEqual(w.handle(ev("hist-2", 1_006_000, "poll"), "Front"), "done")
+        self.assertEqual(w.handle(ev("webhook:req-1", 1_005_000, "webhook"), "Front"), "duplicate")
+        self.assertEqual(self.duplicate_of("webhook:req-1"), "hist-2")
+
+    def test_window_boundary_is_inclusive(self):
+        w = EventWorker(self.store, Recorder())
+        w.handle(ev("webhook:req-1", 1_000_000, "webhook"), "Front")
+        self.assertEqual(w.handle(ev("hist-1", 1_000_000 + DUPLICATE_WINDOW_MS, "poll"), "Front"), "duplicate")
+        w.handle(ev("webhook:req-2", 2_000_000, "webhook"), "Front")
+        self.assertEqual(w.handle(ev("hist-2", 2_000_000 + DUPLICATE_WINDOW_MS + 1, "poll"), "Front"), "done")
 
     def test_failed_copy_does_not_hide_the_other_copy(self):
         rec = Recorder(fail_times=1)
@@ -160,6 +195,18 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(result, "failed")
         self.assertEqual(rec.calls, [("e1", "Front")])
         self.assertEqual(store.status("e1"), "pending")  # stays pending, will retry
+
+    def test_begin_error_never_overwrites_a_done_event(self):
+        class BeginRaises(Store):
+            def begin(self, *args, **kwargs):
+                raise sqlite3.OperationalError("database is locked")
+
+        store = BeginRaises(":memory:")
+        store.db.execute("INSERT INTO events (id, device_id, start_ms, end_ms, event_type, status)"
+                         " VALUES ('e1', 'dev1', 1, 1, 'motion_detected', 'done')")
+        rec = Recorder()
+        self.assertEqual(EventWorker(store, rec).handle(ev("e1"), "Front"), "failed")
+        self.assertEqual((store.status("e1"), rec.calls), ("done", []))
 
     def test_thread_survives_failing_finish(self):
         """Worker thread survives if store.finish fails and processes later events."""

@@ -50,21 +50,25 @@ class EventWorker:
 
     def handle(self, ev, name=None):
         """Handle one event at most once. Returns "done", "failed", "duplicate", or None when skipped."""
+        claimed = False  # only a claimed event may be marked failed: never overwrite a done one
         try:
             if name is None and self.name_for:
                 name = self.name_for(ev)
             if not self.store.begin(ev, name, self.max_attempts):
                 return None
-            if self.store.find_duplicate(ev, DUPLICATE_WINDOW_MS):
-                self.store.finish(ev["id"], "duplicate")
+            claimed = True
+            original = self.store.find_duplicate(ev, DUPLICATE_WINDOW_MS)
+            if original:
+                self.store.finish(ev["id"], "duplicate", original)
                 return "duplicate"
             self.process(ev, name)
         except Exception as e:
             print(f"event {ev.get('id')} failed: {type(e).__name__}: {e}")
-            try:
-                self.store.finish(ev["id"], "failed")
-            except Exception:
-                pass
+            if claimed:
+                try:
+                    self.store.finish(ev["id"], "failed")
+                except Exception:
+                    pass
             return "failed"
         try:
             self.store.finish(ev["id"], "done")

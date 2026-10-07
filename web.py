@@ -7,6 +7,7 @@ from bridge import describe_action
 from webhooks import parse_webhook, verify_signature
 
 MAX_WEBHOOK_BYTES = 65_536  # Ring webhooks are small; refuse anything bigger before reading it
+REQUEST_TIMEOUT = 10  # seconds a client may stall on the socket before its connection is dropped
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>PorchLink</title>
@@ -34,34 +35,38 @@ tick(); setInterval(tick,1000); setTimeout(()=>location.reload(),15000);
 </script></body></html>"""
 
 
-def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret=""):
+def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret="", log_bodies=False):
     class Handler(BaseHTTPRequestHandler):
+        timeout = REQUEST_TIMEOUT
+
         def do_POST(self):
             if self.path != "/webhook" or not enqueue:
                 return self._send(404, "text/plain", "not found")
             if not webhook_secret:
-                return self._send(503, "text/plain", "webhook secret not configured")
+                return self._refuse(503, "webhook secret not configured")
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             if ctype != "application/json":
-                return self._send(415, "text/plain", "expected application/json")
+                return self._refuse(415, "expected application/json")
             try:
                 length = int(self.headers.get("Content-Length") or "")
             except ValueError:
                 length = -1
             if length < 0:
-                return self._send(400, "text/plain", "bad Content-Length")
+                return self._refuse(400, "bad Content-Length")
             if length > MAX_WEBHOOK_BYTES:
-                return self._send(413, "text/plain", "webhook too large")
+                return self._refuse(413, "webhook too large")
             body = self.rfile.read(length)
             if not verify_signature(webhook_secret, body, self.headers.get("X-Signature")):
-                return self._send(401, "text/plain", "bad signature")
+                return self._refuse(401, "bad signature")
+            if log_bodies:  # opt-in (WEBHOOK_LOG=1): capture Ring's real payload; only verified bodies are printed
+                print(f"webhook body: {body.decode('utf-8', 'replace')}")
             try:
                 payload = json.loads(body)
                 if not isinstance(payload, dict):
                     raise ValueError("payload is not a JSON object")
                 ev = parse_webhook(payload)
             except ValueError as e:
-                return self._send(400, "text/plain", f"bad webhook: {e}")
+                return self._refuse(400, f"bad webhook: {e}")
             if ev is not None:  # door event: the worker does the rest; Ring needs a 200 within 5 s
                 enqueue(ev, None)
             self._send(200, "text/plain", "ok")
@@ -80,6 +85,10 @@ def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret
                 self._send(200, "text/html; charset=utf-8", PAGE.format(devices_block=block, rows=rows))
             else:
                 self._send(404, "text/plain", "not found")
+
+        def _refuse(self, code, reason):
+            print(f"webhook refused {code}: {reason}")  # never the body: it is not verified yet
+            self._send(code, "text/plain", reason)
 
         def _send(self, code, ctype, text):
             self.send_response(code)
@@ -108,7 +117,7 @@ def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 
-def serve(store, tz, port=8080, enqueue=None, devices=None, webhook_secret=""):
-    server = make_server(store, tz, port, enqueue, devices, webhook_secret)
+def serve(store, tz, port=8080, enqueue=None, devices=None, webhook_secret="", log_bodies=False):
+    server = make_server(store, tz, port, enqueue, devices, webhook_secret, log_bodies)
     print(f"Dashboard: http://127.0.0.1:{port}")
     server.serve_forever()

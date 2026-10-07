@@ -134,6 +134,30 @@ class PollIsolationTest(unittest.TestCase):
                               lambda ev, name: submitted.append((ev["id"], name)))
         self.assertEqual((n, submitted), (1, [("b-1", "B")]))
 
+    class OneBadItem:
+        """Device a returns one malformed item (no id) and one good one; device b returns a good one."""
+        def devices(self):
+            return [{"id": "a", "attributes": {"name": "A"}}, {"id": "b", "attributes": {"name": "B"}}]
+
+        def events(self, device_id):
+            def raw(eid, start):
+                return {"type": "history-events", "id": eid,
+                        "attributes": {"start": start, "end": start + 1, "event_type": "motion_detected"}}
+            if device_id == "a":
+                return [{"type": "history-events", "attributes": {"start": 1000, "end": 1001}}, raw("a-1", 2000)]
+            return [raw("b-1", 3000)]
+
+    def test_malformed_item_does_not_hide_the_rest(self):
+        submitted = []
+        with mock.patch("builtins.print") as out:
+            app.poll_once(self.OneBadItem(), Store(":memory:"), lambda ev, name: submitted.append((ev["id"], name)))
+        self.assertEqual(submitted, [("a-1", "A"), ("b-1", "B")])
+        self.assertTrue(any(str(c.args[0]).startswith("bad event from A: ") for c in out.call_args_list))
+
+    def test_parse_error_that_is_an_expired_token_still_propagates(self):
+        with mock.patch("app.parse_event", side_effect=TokenExpired("expired")), self.assertRaises(TokenExpired):
+            app.poll_once(self.OneBadItem(), Store(":memory:"), lambda ev, name: None)
+
     def test_expired_token_still_stops_polling(self):
         with self.assertRaises(TokenExpired):
             app.poll_once(self.TwoDoors(TokenExpired("expired")), Store(":memory:"), lambda ev, name: None)
@@ -181,6 +205,38 @@ class PollIsolationTest(unittest.TestCase):
         with mock.patch("builtins.print"):
             self.assertEqual(app.DeviceNames(Down())({"device_id": "ava1.ring.device.ABC123"}),
                              "Ring device ...ABC123")
+
+
+class RetryAgeTest(unittest.TestCase):
+    NOW_MS = 1_800_000_000_000
+
+    class One:
+        def __init__(self, start):
+            self.start = start
+
+        def devices(self):
+            return [{"id": "a", "attributes": {"name": "A"}}]
+
+        def events(self, device_id):
+            return [{"type": "history-events", "id": "a-1",
+                     "attributes": {"start": self.start, "end": self.start + 1, "event_type": "motion_detected"}}]
+
+    def poll(self, status, age_ms):
+        store, submitted = Store(":memory:"), []
+        if status:
+            store.begin({"id": "a-1", "device_id": "a", "start_ms": self.NOW_MS - age_ms, "end_ms": 0,
+                         "event_type": "motion_detected", "sub_type": None, "source": "poll"}, "A", 3)
+            store.finish("a-1", status)
+        with mock.patch("app.time.time", return_value=self.NOW_MS / 1000):
+            app.poll_once(self.One(self.NOW_MS - age_ms), store, lambda ev, name: submitted.append(ev["id"]))
+        return submitted
+
+    def test_stale_failed_event_is_not_retried_but_a_recent_one_is(self):
+        self.assertEqual(self.poll("failed", 20 * 60_000), [])
+        self.assertEqual(self.poll("failed", 60_000), ["a-1"])
+
+    def test_stale_new_event_is_still_submitted(self):
+        self.assertEqual(self.poll(None, 20 * 60_000), ["a-1"])
 
 
 class EmailTest(unittest.TestCase):

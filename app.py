@@ -18,6 +18,7 @@ from worker import EventWorker
 import web
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+RETRY_MAX_AGE_MS = 600_000  # after a restart, do not replay a failed/pending event older than this
 
 
 def load_env_file(path):
@@ -98,14 +99,23 @@ def poll_once(ring, store, submit, alert_new=True, seeded=None):
             continue
         record_only = (device["id"] not in seeded) if seeded is not None else not alert_new
         recorded = 0
-        for ev in sorted((parse_event(raw, device["id"]) for raw in raws), key=lambda e: e["start_ms"]):
+        parsed = []
+        for raw in raws:
+            try:
+                parsed.append(parse_event(raw, device["id"]))
+            except TokenExpired:
+                raise
+            except Exception as e:  # one malformed item must not hide the rest, or the other devices
+                print(f"bad event from {name}: {type(e).__name__}: {e}")
+        for ev in sorted(parsed, key=lambda e: e["start_ms"]):
             if record_only:
                 recorded += store.record_history(ev, name)
                 continue
             status = store.status(ev["id"])
             if status is None:
                 new += 1
-            if status in (None, "failed", "pending"):  # the worker decides; it never handles an event twice
+            # the worker decides; it never handles an event twice. Old failed/pending events are not retried.
+            if status is None or (status in ("failed", "pending") and ev["start_ms"] >= time.time() * 1000 - RETRY_MAX_AGE_MS):
                 submit(ev, name)
         if seeded is not None and record_only:
             seeded.add(device["id"])
@@ -157,7 +167,7 @@ def main():
                          name_for=DeviceNames(ring)).start()
     webhook_secret = env.get("RING_WEBHOOK_SECRET", "")
     threading.Thread(target=web.serve, args=(store, tz, int(env.get("WEB_PORT", 8080)), worker.submit, devices,
-                                             webhook_secret), daemon=True).start()
+                                             webhook_secret, env.get("WEBHOOK_LOG") == "1"), daemon=True).start()
     print(f"PorchLink | {'FAKE mode' if fake else 'Ring API'} | poll every {poll_seconds}s | "
           f"email {'ON -> ' + alerter.to if alerter.enabled else 'OFF (printing only)'} | "
           f"webhooks {'signed' if webhook_secret else 'OFF (set RING_WEBHOOK_SECRET)'} | "

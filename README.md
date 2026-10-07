@@ -36,8 +36,10 @@ Dashboard: http://127.0.0.1:8080 (virtual lights update every second, plus the e
 
 ## How it works
 
-1. Polls Ring **Event History** (`/v1/history/devices/{id}/events`) every `POLL_SECONDS`.
-2. Stores new events in SQLite (`porchlink.db`). The first poll records history without alerting.
+1. Polls Ring **Event History** (`/v1/history/devices/{id}/events`) every `POLL_SECONDS`. Signed webhooks
+   and polls feed one worker, which handles each event once.
+2. Stores new events in SQLite (`porchlink.db`). Each camera's existing history is recorded once, without
+   alerts, on that camera's first successful poll.
 3. Rules (`rules.py`):
    - activity between `NIGHT_START` and `NIGHT_END` → night alert
    - `BURST_COUNT` events within `BURST_MINUTES` → burst alert, once per window
