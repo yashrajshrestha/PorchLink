@@ -15,11 +15,12 @@ class Response(io.BytesIO):
 
 
 class Opener:
-    """Records every request. POSTs get `reply` (a Response, or an exception to raise); DELETEs get 204,
-    or raise `delete_error` when set."""
+    """Records every request. POSTs get `reply` (a Response, or an exception to raise; a list is used one per POST,
+    the last repeating); DELETEs get 204, or raise `delete_error` when set."""
 
     def __init__(self, reply, delete_error=None):
         self.reply, self.delete_error, self.requests = reply, delete_error, []
+        self.posts = 0
 
     def __call__(self, req, timeout):
         self.requests.append((req.get_method(), req.full_url, dict(req.header_items()), req.data))
@@ -27,9 +28,11 @@ class Opener:
             if self.delete_error:
                 raise self.delete_error
             return Response(204)
-        if isinstance(self.reply, Exception):
-            raise self.reply
-        return Response(self.reply.status, self.reply.getvalue(), self.reply.headers)  # fresh: the caller closes it
+        reply = self.reply[min(self.posts, len(self.reply) - 1)] if isinstance(self.reply, list) else self.reply
+        self.posts += 1
+        if isinstance(reply, Exception):
+            raise reply
+        return Response(reply.status, reply.getvalue(), reply.headers)  # fresh: the caller closes it
 
 
 class FakeTimer:
@@ -80,9 +83,8 @@ class LiveViewsTest(unittest.TestCase):
     def test_browser_never_sees_the_token_or_ring_session_url(self):
         out = self.views(self.ok()).start(FRONT, "v=0 offer")
         self.assertGreaterEqual(len(out["session"]), 16)
-        for secret in ("secret-token", "/v1/whep/sessions/abc", "abc"):
-            self.assertNotIn(secret, out["session"])
-        self.assertNotIn("secret-token", repr(out))
+        for secret in ("secret-token", "/v1/whep/sessions/abc"):
+            self.assertNotIn(secret, repr(out))
 
     def test_stop_deletes_the_absolute_location_once(self):
         live = self.views(self.ok())
@@ -101,11 +103,23 @@ class LiveViewsTest(unittest.TestCase):
         self.assertEqual(len(self.deletes()), 1)
 
     def test_oldest_session_is_closed_at_the_limit(self):
-        live = self.views(self.ok(), max_sessions=2)
+        live = self.views([self.ok("/s/a"), self.ok("/s/b"), self.ok("/s/c")], max_sessions=2)
         a, b, c = (live.start(FRONT, "v=0 offer")["session"] for _ in range(3))
+        self.assertEqual(self.deletes(), [("https://api.example.com/s/a", "Bearer secret-token")])
+        self.assertEqual([t.cancelled for t in self.timers], [True, False, False])
         self.assertFalse(live.stop(a))
         self.assertTrue(live.stop(b))
         self.assertTrue(live.stop(c))
+
+    def test_failed_start_at_the_limit_does_not_evict(self):
+        error = urllib.error.HTTPError("https://x", 500, "no", {}, io.BytesIO(b"oops"))
+        live = self.views([self.ok(), error], max_sessions=1)
+        sid = live.start(FRONT, "v=0 offer")["session"]
+        with self.assertRaises(LiveError):
+            live.start(FRONT, "v=0 offer")
+        self.assertEqual(self.deletes(), [])
+        self.assertFalse(self.timers[0].cancelled)
+        self.assertTrue(live.stop(sid))
 
     def test_ring_errors_become_readable_messages(self):
         expected = {401: "Ring token expired: get a new Playground token and restart PorchLink",
@@ -141,6 +155,30 @@ class LiveViewsTest(unittest.TestCase):
         sid = live.start(FRONT, "v=0 offer")["session"]
         self.assertTrue(live.stop(sid))
         self.assertEqual([r[0] for r in self.opener.requests], ["POST"])
+
+    def test_location_on_another_host_is_ignored(self):
+        live = self.views(self.ok("https://evil.example/x"))
+        sid = live.start(FRONT, "v=0 offer")["session"]
+        self.assertTrue(live.stop(sid))
+        self.assertEqual([r[0] for r in self.opener.requests], ["POST"])  # the token never leaves Ring's host
+
+    def test_unencodable_offers_are_bad_requests(self):
+        live = self.views(self.ok())
+        for offer in ("\ud800", None, b"v=0 offer", 5):
+            with self.assertRaises(LiveError) as cm:
+                live.start(FRONT, offer)
+            self.assertEqual((cm.exception.status, cm.exception.message), (400, "Bad video offer"))
+        self.assertEqual(self.opener.requests, [])
+
+    def test_unreadable_error_body_still_maps_by_status(self):
+        class Broken(io.BytesIO):
+            def read(self, *args):
+                raise OSError("reset")
+
+        error = urllib.error.HTTPError("https://x", 401, "no", {}, Broken())
+        with self.assertRaises(LiveError) as cm:
+            self.views(error).start(FRONT, "v=0 offer")
+        self.assertEqual(cm.exception.message, "Ring token expired: get a new Playground token and restart PorchLink")
 
     def test_close_errors_are_logged_not_raised(self):
         live = self.views(self.ok(), delete_error=ConnectionResetError("gone"))
