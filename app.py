@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from alerts import EmailAlerter
 from bridge import Bridge, IotCorePublisher, LocalPublisher, MqttPublisher, VirtualDevices, describe_action, load_config
 from ring_client import FakeRing, RingClient, TokenExpired, device_name, parse_event
-from rules import Settings, evaluate, format_alert
+from rules import Settings, evaluate, format_alert, is_night
 from store import Store
 from worker import EventWorker
 import web
@@ -78,6 +78,20 @@ def make_process(store, alerter, settings, tz, describe=None, bridge=None):
     def process(ev, name):
         handle_event(ev, name, store, alerter, settings, tz, describe, bridge)
     return process
+
+
+def make_status(health, settings, tz, poll_seconds, mode):
+    """The dashboard header: is Ring answering, local time, and day or night (the app's night window)."""
+    def status():
+        now = datetime.now(tz)
+        last = health.get("last_ok")
+        if last is None:
+            ring_ok = False if health.get("failed") else None
+        else:
+            ring_ok = time.time() - last < 3 * poll_seconds + 5
+        return {"mode": mode, "ring_ok": ring_ok, "night": is_night(now.hour, settings),
+                "time": now.strftime("%I:%M %p").lstrip("0"), "day": now.strftime("%a")}
+    return status
 
 
 def poll_once(ring, store, submit, alert_new=True, seeded=None):
@@ -166,8 +180,10 @@ def main():
     worker = EventWorker(store, make_process(store, alerter, settings, tz, describe, bridge),
                          name_for=DeviceNames(ring)).start()
     webhook_secret = env.get("RING_WEBHOOK_SECRET", "")
+    health = {}
+    status = make_status(health, settings, tz, poll_seconds, "FAKE mode" if fake else "Ring API")
     threading.Thread(target=web.serve, args=(store, tz, int(env.get("WEB_PORT", 8080)), worker.submit, devices,
-                                             webhook_secret, env.get("WEBHOOK_LOG") == "1"), daemon=True).start()
+                                             webhook_secret, env.get("WEBHOOK_LOG") == "1", status), daemon=True).start()
     print(f"PorchLink | {'FAKE mode' if fake else 'Ring API'} | poll every {poll_seconds}s | "
           f"email {'ON -> ' + alerter.to if alerter.enabled else 'OFF (printing only)'} | "
           f"webhooks {'signed' if webhook_secret else 'OFF (set RING_WEBHOOK_SECRET)'} | "
@@ -180,9 +196,11 @@ def main():
     while True:
         try:
             poll_once(ring, store, worker.submit, seeded=seeded)
+            health["last_ok"] = time.time()
         except TokenExpired:
             sys.exit("\nRing token expired. Generate a new one in the Playground and restart with the new RING_TOKEN.")
         except Exception as e:
+            health["failed"] = True
             print(f"poll error: {e}")
         time.sleep(poll_seconds)
 

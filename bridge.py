@@ -88,6 +88,8 @@ class Bridge:
                 continue
             payload = {**command, "automation": automation["name"], "event_id": ev["id"],
                        "source": source_name, "sent_at": int(self.clock() * 1000)}
+            if automation.get("label"):
+                payload["label"] = automation["label"]  # what the dashboard tile says ("Doorbell!", "Package")
             try:
                 self.publisher.publish(topic, payload)
                 ok, error = True, None
@@ -118,6 +120,8 @@ def describe_action(r):
         what = f"ON for {d // 60} min" if d >= 60 else f"ON for {d} s"
     elif c["action"] == "flash":
         what = f"flash x{c.get('times', 1)}"
+    elif c["action"] == "pulse":
+        what = "gentle pulse"
     else:
         what = c["action"].upper()
     return f"{r['device_name']} {what} ({r['automation']}){sure}" + ("" if r["ok"] else " - FAILED")
@@ -129,7 +133,7 @@ class VirtualDevices:
     def __init__(self, config, clock=time.time):
         self.clock, self.lock = clock, threading.Lock()
         self.state = {d["id"]: {"id": d["id"], "name": d["name"], "type": d["type"], "on_until": 0,
-                                "flash_until": 0, "last": None} for d in config["devices"]}
+                                "flash_until": 0, "pulse_until": 0, "last": None} for d in config["devices"]}
 
     def apply(self, device_id, cmd):
         now = self.clock()
@@ -141,12 +145,14 @@ class VirtualDevices:
                 s["on_until"] = 0
             elif cmd["action"] == "flash":
                 s["flash_until"] = now + 1.0 * cmd.get("times", 1)  # one flash per second
-            s["last"] = {"automation": cmd.get("automation"), "at": int(now * 1000)}
+            elif cmd["action"] == "pulse":
+                s["pulse_until"] = now + cmd.get("duration_s", 10)  # a soft, slow glow: "the AI is not sure"
+            s["last"] = {"automation": cmd.get("automation"), "label": cmd.get("label"), "at": int(now * 1000)}
 
     def snapshot(self):
         now = self.clock()
         with self.lock:
-            return [{**s, "on": s["on_until"] > now, "flashing": s["flash_until"] > now,
+            return [{**s, "on": s["on_until"] > now, "flashing": s["flash_until"] > now, "pulsing": s["pulse_until"] > now,
                      "seconds_left": max(0, int(s["on_until"] - now))} for s in self.state.values()]
 
 

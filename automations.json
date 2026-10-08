@@ -8,16 +8,19 @@
   "automations": [
     {"name": "Night path light",
      "why": "Light the way so nobody walks to the door in the dark.",
+     "label": "Night path",
      "when": {"kind": ["night"]},
      "do": [{"device": "hallway-light", "action": "on", "duration_s": 300}]},
 
     {"name": "Visual doorbell",
      "why": "Flash the lights for people who cannot hear the bell.",
+     "label": "Doorbell!",
      "when": {"kind": ["doorbell"]},
      "do": [{"device": "living-room-light", "action": "flash", "times": 3}]},
 
     {"name": "Package porch light",
      "why": "Make a delivered package easy to see and hard to take unnoticed.",
+     "label": "Package",
      "when": {"description_has": ["package", "box", "parcel"],
               "ask": {"question": "Is a delivered package, box or parcel visible at the door?",
                       "yes": "a package, parcel or shipping box is at the door",
@@ -27,6 +30,7 @@
 
     {"name": "Night vehicle floodlight",
      "why": "Light up the driveway when a car arrives at night.",
+     "label": "Car arriving",
      "when": {"kind": ["night"], "description_has": ["car", "vehicle", "truck", "van"],
               "ask": {"question": "Is a car, truck or other vehicle visible in the driveway?",
                       "yes": "a car, truck, van or other vehicle is in the driveway",
