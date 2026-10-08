@@ -16,6 +16,7 @@ class ScoreTest(unittest.TestCase):
     def test_score(self):
         s = eval_decider.score(self.CASES, self.ANSWERS, 0.5)
         self.assertEqual((s["cases"], s["right"], s["failed"], s["unsure"]), (4, 2, 1, 1))
+        self.assertEqual(s["sure_right"], 2)  # right and p >= 0.5: the package (0.9) and the courier's package (0.73)
         self.assertEqual(s["per_class"]["person"], {"cases": 1, "right": 1})  # package is acceptable for the courier
         self.assertEqual(s["per_class"]["animal"], {"cases": 1, "right": 0})
         self.assertEqual(s["confusion"]["animal"], {"nothing": 1})
@@ -24,9 +25,16 @@ class ScoreTest(unittest.TestCase):
 
     def test_report(self):
         md = eval_decider.report(eval_decider.score(self.CASES, self.ANSWERS, 0.5), 0.5, "m", "hw", "2026-10-08")
-        self.assertIn("**2/4 right**", md)
+        self.assertIn("**2/4 right** · **2/4 right and sure** (p ≥ 0.5: the light pattern fires) · "
+                      "unsure (p < 0.5, the house pulses \"Not sure\") 1 · failed calls 1 · latency ", md)
         self.assertIn("| animal | 0 | 0 | 0 | 0 | 1 |", md)
         self.assertIn("- A cat. — expected animal, got nothing 0.45", md)
+
+    def test_sure_right_excludes_right_answers_below_the_cutoff(self):
+        cases = [{"description": "A box.", "expect": ["package"]}, {"description": "A cat.", "expect": ["animal"]}]
+        answers = [{"label": "package", "p": 0.4, "ms": 1}, {"label": "animal", "p": 0.5, "ms": 1}]
+        s = eval_decider.score(cases, answers, 0.5)
+        self.assertEqual((s["right"], s["sure_right"], s["unsure"]), (2, 1, 1))
 
     def test_report_when_every_call_failed(self):
         md = eval_decider.report(eval_decider.score(self.CASES[:1], [None], 0.5), 0.5, "m", "hw", "2026-10-08")

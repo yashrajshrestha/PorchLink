@@ -1,13 +1,16 @@
 # PorchLink
 
 **Ring events drive the rest of the smart home.** When a Ring camera sees activity, PorchLink applies
-rules (night time, doorbell, bursts, and what Amazon Bedrock sees in the frame) and sends commands to
-other devices through AWS IoT Core, for example:
+rules (night time, doorbell, bursts, and what Amazon Bedrock and Strands Decider say is in the frame) and sends
+commands to other devices through AWS IoT Core, for example:
 
-- motion after 23:00 → hallway light on for 5 minutes, so nobody walks to the door in the dark
 - doorbell pressed → living-room light flashes 3 times, for people who cannot hear the bell
-- Bedrock sees a package → porch light on for 10 minutes
-- Bedrock sees a car at night → driveway floodlight on
+- package at the door → porch light on for 10 minutes
+- person at night → hallway, living-room and porch lights flash 3 times
+- person by day → living-room light gives a gentle pulse
+- car at night → driveway floodlight on for 3 minutes
+- AI not sure → living-room light gives a gentle pulse ("check the camera")
+- night motion and no AI answer (AI off, down or no description) → hallway light on for 5 minutes
 
 The Ring Partner API is read-only, so PorchLink never controls Ring devices: it bridges Ring events
 to other devices. Automations live in `automations.json`. The core runs on the Python 3.9+ standard library.
@@ -28,10 +31,12 @@ Preview the dashboard without Ring or AWS (every light state + sample events): `
 
 - Each automation has `when` (all must hold: `kind` such as `night` / `doorbell` / `person` / `burst`,
   `description_has` words from the Bedrock description, optional `source` camera name, `time` `day` or `night`,
-  `seen` Decider answers such as `["package"]`, or `"unsure": true`) and `do` (device commands).
-  `cooldown_s` is measured in event time.
+  `seen` Decider answers such as `["package"]`, `"unsure": true`, or `"no_decision": true` for "there is no
+  Decider answer") and `do` (device commands). `cooldown_s` is measured in event time.
+- Keywords match whole words ("car" does not match "cardboard"; "box" matches "boxes"). A word after
+  "no", "not", "n't" and similar in the same sentence is ignored: "no person is visible" does not mention a person.
 - An automation can have an optional `label`, the word shown on its dashboard tile (for example "Doorbell!").
-- The `pulse` action is a gentle glow, used when the AI isn't sure; it lasts `duration_s` (default 10).
+- The `pulse` action is a gentle glow, used for "Visitor by day" and when the AI isn't sure; it lasts `duration_s` (default 10).
 - Commands are JSON on MQTT topics `porchlink/<device_id>/set`, for example
   `{"action": "on", "duration_s": 600, "automation": "Package porch light", "label": "Package", ...}`.
 - `BRIDGE=local` (default): virtual lights in this process, shown on the dashboard. No AWS needed.
@@ -87,7 +92,7 @@ python3 sim/fake_ring_server.py sim/scenarios/night_visit.json --speed 60 --chao
 ## Test
 
 ```bash
-python3 -m unittest test_porchlink test_sim test_vision test_bridge test_decider test_webhooks test_worker test_web -v   # app, sim, chaos, Bedrock/Ollama/Decider/MQTT (stubbed), bridge
+python3 -m unittest test_porchlink test_sim test_vision test_bridge test_decider test_webhooks test_worker test_web test_dashboard test_eval_decider -v   # app, sim, chaos, Bedrock/Ollama/Decider/MQTT (stubbed), bridge
 .venv/bin/python -m unittest test_grab_frame -v     # v2 frame grab (needs requirements-v2.txt)
 ```
 
@@ -130,9 +135,11 @@ With `DECIDER_ENABLED=1`, PorchLink asks a local [Strands Decider 2B](https://gi
 server one question per described motion event: "What is at the door in this camera frame?", with the options
 package / person / vehicle / animal / nothing. The answer and the time of day pick the light pattern in `automations.json`:
 package → porch light on, person at night → three lights flash, person by day → gentle pulse, vehicle at night →
-floodlight, animal or nothing → nothing ("false alarm skipped" on the dashboard). When the top answer's p is below
-`DECIDER_MIN_P` (default 0.5) the house gives a gentle "Not sure" pulse instead. Doorbell presses never ask Decider.
-If the server is down, rules fall back to their keywords. The app sends one warm-up request at startup.
+floodlight, animal or nothing → nothing ("false alarm skipped" on the dashboard). A vehicle by day does nothing.
+When the top answer's p is below `DECIDER_MIN_P` (default 0.5) the house gives a gentle "Not sure" pulse instead.
+Doorbell presses and live views never ask Decider.
+If the server is down, rules fall back to their keywords, and night motion with no keyword match still lights the
+hallway ("Night light (AI off)"). The app sends one warm-up request at startup.
 Scores on 42 labelled descriptions: [docs/decider-eval.md](docs/decider-eval.md) (`python3 eval_decider.py`).
 
 ```bash
@@ -141,12 +148,12 @@ Scores on 42 labelled descriptions: [docs/decider-eval.md](docs/decider-eval.md)
 DECIDER_ENABLED=1 BEDROCK_ENABLED=1 AWS_PROFILE=<your own account> .venv/bin/python app.py
 ```
 
-Measured on a 12-core CPU, no GPU (2026-10-06): first start about 18 min (downloads Qwen3.5-2B-Base), 7.8 GB RAM,
-**7 to 17 s per event**, first call 86 s (the published 115 ms is on an RTX 3090). Calls run in the poll loop, so a burst
-of events queues. On 8 package and 5 vehicle descriptions written by hand, a 2-option `choice` with descriptive yes/no
-options scored better than `noul`, and 0.8 separated them all, but narrowly (pizza box 0.77 vs "A box sits on the
-doorstep." 0.82; "A toy car lies on the doormat." 0.78). The questions and threshold were tuned on those same
-descriptions, not on real Nova Lite output: re-check with Bedrock on before trusting 0.8.
+Speed: on a 12-core CPU it is 7 to 17 s per call (measured 2026-10-06 with the old 2-option design; first call 86 s).
+On Apple MPS it is about 0.3 s p50 ([docs/decider-eval.md](docs/decider-eval.md)). Calls run in the single worker
+thread, so a slow call delays later events. `DECIDER_TIMEOUT` defaults to 30 s.
+
+If your `.env` still has `DECIDER_MIN_P=0.8` from an older copy, change it to 0.5, or most events will pulse "Not sure".
+The questions and cutoff were tuned on hand-written descriptions, not on real Nova Lite output: re-check with Bedrock on.
 
 ## Next (v2)
 

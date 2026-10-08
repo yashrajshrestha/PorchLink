@@ -2,7 +2,7 @@
 
 Model `strands-decider-2B-hobson-v21` on Apple Silicon Mac, PyTorch MPS. One `choice` question, "What is at the door in this camera frame?", with the 5 options in `decider.SEEN_OPTIONS`; state text as in `decider.state_text`. Cases: `eval/decider_cases.json` (hand-written descriptions in the style of Bedrock Nova; the option wording was picked on 15 of them).
 
-**42/42 right** · unsure (p < 0.5, the house pulses "Not sure") 7 · failed calls 0 · latency p50 299 ms, p95 385 ms
+**42/42 right** · **35/42 right and sure** (p ≥ 0.5: the light pattern fires) · unsure (p < 0.5, the house pulses "Not sure") 7 · failed calls 0 · latency p50 305 ms, p95 310 ms
 
 | class | cases | right |
 |---|---|---|

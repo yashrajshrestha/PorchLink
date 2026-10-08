@@ -16,9 +16,10 @@ REPORT = os.path.join(HERE, "docs", "decider-eval.md")
 
 def score(cases, answers, min_p):
     """answers[i] is {"label", "p", "ms"} for cases[i], or None when the call failed. A case counts under its
-    first expected label and is right when Decider's top option is any of them."""
+    first expected label and is right when Decider's top option is any of them. `sure_right` counts the right
+    answers with p >= min_p: the ones that would fire a light pattern rather than pulse "Not sure"."""
     per_class, confusion, misses = {}, {}, []
-    right = failed = unsure = 0
+    right = sure_right = failed = unsure = 0
     for case, a in zip(cases, answers):
         want = case["expect"][0]
         stats = per_class.setdefault(want, {"cases": 0, "right": 0})
@@ -31,12 +32,13 @@ def score(cases, answers, min_p):
         unsure += a["p"] < min_p
         if a["label"] in case["expect"]:
             right += 1
+            sure_right += a["p"] >= min_p
             stats["right"] += 1
         else:
             misses.append((case["description"], case["expect"], a["label"], a["p"]))
     ms = sorted(a["ms"] for a in answers if a)
     pct = lambda q: ms[min(len(ms) - 1, int(q * len(ms)))] if ms else None
-    return {"cases": len(cases), "right": right, "failed": failed, "unsure": unsure, "per_class": per_class,
+    return {"cases": len(cases), "right": right, "sure_right": sure_right, "failed": failed, "unsure": unsure, "per_class": per_class,
             "confusion": confusion, "misses": misses, "p50_ms": pct(0.5), "p95_ms": pct(0.95)}
 
 
@@ -48,7 +50,8 @@ def report(s, min_p, model, hardware, day):
         f"Model `{model}` on {hardware}. One `choice` question, \"{SEEN_QUESTION}\", with the 5 options in "
         f"`decider.SEEN_OPTIONS`; state text as in `decider.state_text`. Cases: `eval/decider_cases.json` "
         f"(hand-written descriptions in the style of Bedrock Nova; the option wording was picked on 15 of them).", "",
-        f"**{s['right']}/{s['cases']} right** · unsure (p < {min_p}, the house pulses \"Not sure\") {s['unsure']} · "
+        f"**{s['right']}/{s['cases']} right** · **{s['sure_right']}/{s['cases']} right and sure** (p ≥ {min_p}: the "
+        f"light pattern fires) · unsure (p < {min_p}, the house pulses \"Not sure\") {s['unsure']} · "
         f"failed calls {s['failed']} · latency {latency}", "",
         "| class | cases | right |", "|---|---|---|",
         *[f"| {c} | {v['cases']} | {v['right']} |" for c, v in s["per_class"].items()], "",
@@ -78,7 +81,7 @@ def main():
     s = score(cases, answers, a.min_p)
     with open(REPORT, "w") as f:
         f.write(report(s, a.min_p, a.model, a.hardware, date.today().isoformat()))
-    print(f"{s['right']}/{s['cases']} right, {s['unsure']} unsure, {s['failed']} failed -> {REPORT}")
+    print(f"{s['right']}/{s['cases']} right, {s['sure_right']} right and sure, {s['unsure']} unsure, {s['failed']} failed -> {REPORT}")
 
 
 if __name__ == "__main__":
