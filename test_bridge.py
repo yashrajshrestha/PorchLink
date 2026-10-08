@@ -5,7 +5,8 @@ import json, os, unittest
 from datetime import datetime
 
 import app
-from bridge import Bridge, IotCorePublisher, LocalPublisher, MqttPublisher, VirtualDevices, describe_action, load_config, matches
+from bridge import (Bridge, IotCorePublisher, LocalPublisher, MqttPublisher, VirtualDevices, describe_action, load_config,
+                    matches, mentions)
 from decider import SEEN_OPTIONS, SEEN_QUESTION
 from rules import Settings
 from store import Store
@@ -49,6 +50,26 @@ class MatchTest(unittest.TestCase):
         self.assertFalse(matches({"unsure": True}, set(), "A box.", "x", pkg, 0.5))
         self.assertFalse(matches({"unsure": True}, set(), "A shape.", "x", None, 0.5))  # no answer is not "unsure"
         self.assertFalse(matches({"unsure": True}, {"doorbell"}, "A shape.", "x", {"label": "person", "p": 0.4}, 0.5))
+
+    def test_no_decision_condition(self):
+        when = {"kind": ["night"], "no_decision": True}
+        self.assertTrue(matches(when, {"night"}, None, "x"))
+        self.assertFalse(matches(when, {"night"}, "A cat.", "x", {"label": "animal", "p": 0.9}, 0.5))
+        self.assertFalse(matches({"no_decision": True}, {"doorbell", "night"}, None, "x"))  # never for a doorbell press
+
+    def test_keywords_are_whole_words_and_skip_negated_mentions(self):
+        self.assertTrue(mentions("A box is on the doorstep.", ["box"]))
+        self.assertTrue(mentions("Two parcels by the door.", ["parcel"]))
+        self.assertTrue(mentions("Boxes on the step.", ["box"]))
+        self.assertTrue(mentions("A man stands at the door, no packages.", ["man"]))  # the mention comes before the negation
+        self.assertFalse(mentions("An empty porch; no person is visible.", ["person"]))
+        self.assertFalse(mentions("Many leaves blow across the porch.", ["man"]))  # "man" inside "many"
+        self.assertFalse(mentions("A cardboard box sits on the doorstep.", ["car"]))  # "car" inside "cardboard"
+        self.assertFalse(mentions("No people, packages, vehicles or animals are visible at the door.",
+                                  ["people", "package", "vehicle"]))
+        self.assertFalse(mentions("There isn't a car here.", ["car"]))
+        self.assertFalse(mentions(None, ["box"]))
+        self.assertFalse(matches({"description_has": ["person"]}, set(), "An empty porch; no person is visible.", "x"))
 
     def test_without_a_decision_seen_falls_back_to_keywords(self):
         self.assertTrue(matches({"seen": ["package"], "description_has": ["box"]}, set(), "A box.", "x"))
@@ -106,15 +127,45 @@ class BridgeTest(unittest.TestCase):
 
     def test_night_vehicle_by_keywords(self):
         results = self.bridge.run(self.ev, {"night"}, "A silver car is parked in the driveway.", "Back Yard")
-        self.assertEqual([r["device"] for r in results], ["floodlight"])
+        self.assertEqual([(r["automation"], r["device"]) for r in results],
+                         [("Night vehicle floodlight", "floodlight"), ("Night light (AI off)", "hallway-light")])
         self.assertEqual(self.bridge.run(self.ev, {"activity"}, "A silver car is parked.", "Back Yard"), [])  # day
+
+    def test_cardboard_box_is_not_a_car_and_an_empty_porch_is_not_a_visitor(self):
+        night = self.bridge.run(self.ev, {"night"}, "A cardboard box sits on the doorstep.", "Front Door")
+        self.assertEqual(sorted(r["automation"] for r in night), ["Night light (AI off)", "Package porch light"])
+        empty = self.bridge.run(self.ev, {"night"}, "An empty porch; no person is visible.", "Front Door")
+        self.assertEqual([r["automation"] for r in empty], ["Night light (AI off)"])
 
     def test_without_decider_visitor_uses_keywords_and_unsure_never_fires(self):
         night = self.bridge.run(self.ev, {"night"}, "A man stands at the door.", "Front Door")
-        self.assertEqual(sorted(r["device"] for r in night), ["hallway-light", "living-room-light", "porch-light"])
-        self.assertEqual({r["automation"] for r in night}, {"Visitor at night"})
+        self.assertEqual(sorted((r["automation"], r["device"]) for r in night),
+                         [("Night light (AI off)", "hallway-light"), ("Visitor at night", "hallway-light"),
+                          ("Visitor at night", "living-room-light"), ("Visitor at night", "porch-light")])
         self.assertEqual(self.bridge.run(self.ev, {"activity"}, "A man stands at the door.", "Front Door"), [])
-        self.assertEqual(self.bridge.run(self.ev, {"night"}, "Something moved.", "Front Door"), [])
+        self.assertEqual(self.bridge.run(self.ev, {"activity"}, "Something moved.", "Front Door"), [])
+        crowd = self.bridge.run({"id": "e2", "start_ms": 1_000_000_000 + 300_000}, {"night"}, "Two men and a woman.", "Front Door")
+        self.assertEqual({r["automation"] for r in crowd}, {"Night light (AI off)", "Visitor at night"})  # plural "men"
+
+    def test_night_without_an_answer_lights_the_hallway(self):
+        """The house never goes silent because the AI is down: no description, or no answer, still lights the hallway."""
+        results = self.bridge.run(self.ev, {"night"}, None, "Front Door")
+        self.assertEqual([(r["automation"], r["device"], r["command"]) for r in results],
+                         [("Night light (AI off)", "hallway-light", {"action": "on", "duration_s": 300})])
+        self.assertTrue(self.state("hallway-light")["on"])
+        self.assertEqual(self.state("hallway-light")["last"]["label"], "Night motion")
+        self.assertEqual(self.bridge.run(self.ev, {"activity"}, None, "Front Door"), [])  # by day: nothing
+
+    def test_visitor_flash_does_not_repeat_within_a_minute(self):
+        def at(seconds):
+            return {"id": f"e{seconds}", "start_ms": 1_000_000_000 + seconds * 1000}
+        said = "A man stands at the door."
+        self.assertEqual(len(self.bridge.run(at(0), {"night"}, said, "Front Door")), 4)  # 3 flashes + hallway on
+        second = self.bridge.run(at(30), {"night"}, said, "Front Door")
+        self.assertEqual([r["automation"] for r in second], ["Night light (AI off)"])
+        third = self.bridge.run(at(61), {"night"}, said, "Front Door")
+        self.assertEqual(sorted(r["automation"] for r in third),
+                         ["Night light (AI off)", "Visitor at night", "Visitor at night", "Visitor at night"])
 
     def test_failed_publish_is_reported_not_raised(self):
         class Broken:
@@ -186,8 +237,14 @@ class DeciderBridgeTest(unittest.TestCase):
                          [("Not sure", "living-room-light")])
 
     def test_confident_animal_or_nothing_does_nothing(self):
-        self.assertEqual(self.run_at(0, {"night"}, {"label": "animal", "p": 0.83}), [])
+        self.assertEqual(self.run_at(0, {"night"}, {"label": "animal", "p": 0.83}), [])  # with Decider on, a cat does not light the hallway
         self.assertEqual(self.run_at(1, {"night"}, {"label": "nothing", "p": 0.6}), [])
+
+    def test_visitor_cooldown_with_the_decider(self):
+        person = {"label": "person", "p": 0.9}
+        self.assertEqual(len(self.bridge.run({"id": "a", "start_ms": 1_000_000_000}, {"night"}, "x", "Front Door", person)), 3)
+        self.assertEqual(self.bridge.run({"id": "b", "start_ms": 1_000_000_000 + 30_000}, {"night"}, "x", "Front Door", person), [])
+        self.assertEqual(len(self.bridge.run({"id": "c", "start_ms": 1_000_000_000 + 61_000}, {"night"}, "x", "Front Door", person)), 3)
 
     def test_doorbell_ignores_the_decision(self):
         results = self.run_at(0, {"doorbell", "night"}, {"label": "person", "p": 0.2})
@@ -264,12 +321,18 @@ class DeciderFlowTest(unittest.TestCase):
     def test_no_description_is_never_asked(self):
         decide, decision, automations, _ = self.handle("motion_detected", NIGHT_MS, None,
                                                        {"label": "person", "p": 0.9, "probabilities": {}})
-        self.assertEqual((decide.calls, decision, automations), ([], (None, None), []))
+        self.assertEqual((decide.calls, decision, automations), ([], (None, None), ["Night light (AI off)"]))
+
+    def test_live_view_is_never_asked(self):
+        decide, decision, automations, body = self.handle("on_demand", NIGHT_MS, "A man stands at the door.",
+                                                          {"label": "person", "p": 0.9, "probabilities": {}})
+        self.assertEqual((decide.calls, decision), ([], (None, None)))
+        self.assertNotIn("Decider:", body)
 
     def test_decider_down_falls_back_to_keywords(self):
         decide, decision, automations, body = self.handle("motion_detected", NIGHT_MS, "A man stands at the door.", None)
         self.assertEqual(len(decide.calls), 1)
-        self.assertEqual((decision, automations), ((None, None), ["Visitor at night"] * 3))
+        self.assertEqual((decision, automations), ((None, None), ["Visitor at night"] * 3 + ["Night light (AI off)"]))
         self.assertNotIn("Decider:", body)
 
 
@@ -342,14 +405,13 @@ class EndToEndTest(SimTestCase):
         worker = EventWorker(store, app.make_process(store, Alerter(), Settings(), TZ, describe=describe, bridge=bridge))
         app.poll_once(ring, store, worker.handle)
 
-        fired = store.db.execute("SELECT automation, COUNT(*) FROM actions GROUP BY automation").fetchall()
-        fired = dict(fired)
-        self.assertEqual(fired.get("Visual doorbell"), 1)           # 22:52 button_press
-        self.assertEqual(fired.get("Package porch light"), 2)       # 22:50 and 23:05 ("box"); 23:12 in cooldown
-        self.assertEqual(fired.get("Night vehicle floodlight"), 1)  # 23:11 car, back yard
-        self.assertEqual(fired.get("Visitor at night"), 3)          # 23:12 courier, back yard: three lights flash
-        self.assertNotIn("Visitor by day", fired)                   # needs Decider
-        self.assertNotIn("Not sure", fired)                         # needs Decider
+        fired = dict(store.db.execute("SELECT automation, COUNT(*) FROM actions GROUP BY automation").fetchall())
+        self.assertEqual(fired, {"Visual doorbell": 1,              # 22:52 button_press
+                                 "Package porch light": 2,          # 22:50 and 23:05 ("box"); 23:12 in cooldown
+                                 "Night vehicle floodlight": 1,     # 23:11 car, back yard
+                                 "Visitor at night": 3,             # 23:12 courier, back yard: three lights flash
+                                 # night events without an answer: 23:05, 23:10, 23:11, 23:12 and the 23:40 live view
+                                 "Night light (AI off)": 5})
         doorbell = next(b for s, b in bodies if s.startswith("PorchLink: Doorbell"))
         self.assertIn("Home actions:", doorbell)
         self.assertIn("Living room light flash x3 (Visual doorbell)", doorbell)
@@ -390,7 +452,8 @@ class EndToEndTest(SimTestCase):
                                  "Visual doorbell": 1,            # 22:52, Decider not asked
                                  "Package porch light": 1,        # 23:05
                                  "Night vehicle floodlight": 1,   # 23:11
-                                 "Not sure": 1})                  # 23:12 figure by the fence, p 0.45
+                                 "Not sure": 1,                   # 23:12 figure by the fence, p 0.45
+                                 "Night light (AI off)": 1})      # 23:40 live view: never asked, so no answer
         self.assertEqual(len(decide.asked), 5)  # not the doorbell press, not the live view (no description)
         rows = store.db.execute("SELECT decision, decision_p FROM events WHERE decision IS NOT NULL ORDER BY start_ms")
         self.assertEqual([tuple(r) for r in rows], [("person", 0.9), ("package", 0.93), ("nothing", 0.85),

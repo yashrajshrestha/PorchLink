@@ -37,6 +37,10 @@ class ChooseTest(unittest.TestCase):
         partial = FakeOpener({"answers": {"seen": {"probabilities": {"a": 0.9}}}})  # option b has no probability
         self.assertIsNone(DeciderClient({}, partial).choose("s", "?", options))
 
+    def test_default_timeout_is_30_seconds(self):
+        self.assertEqual(DeciderClient({}).timeout, 30)
+        self.assertEqual(DeciderClient({"DECIDER_TIMEOUT": "5"}).timeout, 5)
+
     def test_shipped_question(self):
         self.assertEqual(list(SEEN_OPTIONS), ["package", "person", "vehicle", "animal", "nothing"])
         self.assertEqual(DEFAULT_MIN_P, 0.5)

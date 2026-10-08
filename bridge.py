@@ -5,7 +5,7 @@ Publishers: LocalPublisher (virtual devices in this process, no AWS),
 IotCorePublisher (AWS IoT Core through the iot-data API, IAM credentials, no device certificates) and
 MqttPublisher (any MQTT broker, e.g. open-source Mosquitto, for testing without AWS).
 """
-import json, threading, time
+import json, re, threading, time
 
 from decider import DEFAULT_MIN_P
 
@@ -21,18 +21,35 @@ def load_config(path):
     return cfg
 
 
+_NEGATION = re.compile(r"\b(?:no|not|nobody|none|without|never)\b|n't\b")
+
+
+def mentions(description, words):
+    """True when the description names one of the words (whole words; plural -s/-es allowed), ignoring
+    anything after a negation in the same sentence: "no person is visible" does not mention a person."""
+    for sentence in re.split(r"[.;!?]", (description or "").lower()):
+        sentence = _NEGATION.split(sentence, 1)[0]
+        if any(re.search(rf"\b{re.escape(w)}(?:e?s)?\b", sentence) for w in words):
+            return True
+    return False
+
+
 def matches(when, kinds, description, source_name, decision=None, min_p=DEFAULT_MIN_P):
     """All conditions in `when` must hold; each condition is satisfied by any of its values.
     `seen` and `unsure` use Decider's answer (`decision`, {"label", "p"}) and never fire for a doorbell press.
     With an answer, a `seen` automation ignores its `description_has` keywords; without one it falls back to
-    them (and does not fire if it has none), and `unsure` never fires."""
+    them (and does not fire if it has none), and `unsure` never fires. `no_decision` holds only when there is no
+    answer (Decider off, failed or not asked), so the house is not silent when the AI is down; it never fires for a
+    doorbell press either. `description_has` words match whole words and not after a negation (see `mentions`)."""
     if "kind" in when and not set(when["kind"]) & kinds:
         return False
     if "time" in when and (when["time"] == "night") != ("night" in kinds):
         return False
     if "source" in when and source_name not in when["source"]:
         return False
-    if ("seen" in when or when.get("unsure")) and "doorbell" in kinds:
+    if ("seen" in when or when.get("unsure") or when.get("no_decision")) and "doorbell" in kinds:
+        return False
+    if when.get("no_decision") and decision is not None:
         return False
     if when.get("unsure"):
         return decision is not None and decision["p"] < min_p
@@ -41,8 +58,7 @@ def matches(when, kinds, description, source_name, decision=None, min_p=DEFAULT_
     if "seen" in when and "description_has" not in when:
         return False
     if "description_has" in when:
-        text = (description or "").lower()
-        if not any(word in text for word in when["description_has"]):
+        if not mentions(description, when["description_has"]):
             return False
     return True
 

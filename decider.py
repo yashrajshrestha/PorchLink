@@ -26,7 +26,7 @@ def state_text(camera, clock, night, ring_label, description):
 class DeciderClient:
     def __init__(self, env, opener=urllib.request.urlopen):
         self.url = env.get("DECIDER_URL", "http://127.0.0.1:8000").rstrip("/") + "/v1/systemone"
-        self.timeout = float(env.get("DECIDER_TIMEOUT", 120))  # Apple MPS: about 0.4 s per call; CPU-only: about 10 s, first call 86 s
+        self.timeout = float(env.get("DECIDER_TIMEOUT", 30))  # one worker thread: a slow call delays later events; MPS about 0.4 s, CPU 7-17 s
         self.opener = opener
 
     def choose(self, state, instructions, options):

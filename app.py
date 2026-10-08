@@ -42,7 +42,8 @@ def settings_from_env(env):
 def handle_event(ev, name, store, alerter, settings, tz, describe=None, bridge=None, decide=None):
     """Apply rules to one new event, ask Decider what is at the door, run home automations, send one email,
     record everything. describe(ev) is optional (Bedrock); it runs only for events that will alert, to keep
-    cost down. decide (a DeciderClient) is optional; it is asked once per described event, never for a doorbell press."""
+    cost down. decide (a DeciderClient) is optional; it is asked once per described motion event, never for a
+    doorbell press or a live view (the state text says "saw motion")."""
     recent = store.starts_since(ev["device_id"], ev["start_ms"] - settings.burst_minutes * 60_000)
     reasons = evaluate(ev, recent, store.last_alert_start(ev["device_id"], "burst"), settings, tz)
     if not reasons:
@@ -52,7 +53,7 @@ def handle_event(ev, name, store, alerter, settings, tz, describe=None, bridge=N
     if description:
         store.set_description(ev["id"], description)
     decision = None
-    if decide and description and "doorbell" not in kinds:
+    if decide and description and ev["event_type"] == "motion_detected":
         local = datetime.fromtimestamp(ev["start_ms"] / 1000, tz)
         decision = decide.choose(state_text(name, f"{local:%H:%M}", "night" in kinds, ev.get("sub_type"), description),
                                  SEEN_QUESTION, SEEN_OPTIONS)
