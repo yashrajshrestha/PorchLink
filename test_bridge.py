@@ -2,9 +2,11 @@
 Ring event -> rules -> actions -> email flow (fake Ring server, stub Bedrock). Run: python3 -m unittest test_bridge -v
 """
 import json, os, unittest
+from datetime import datetime
 
 import app
 from bridge import Bridge, IotCorePublisher, LocalPublisher, MqttPublisher, VirtualDevices, describe_action, load_config, matches
+from decider import SEEN_OPTIONS, SEEN_QUESTION
 from rules import Settings
 from store import Store
 from worker import EventWorker
@@ -204,6 +206,73 @@ class DeciderBridgeTest(unittest.TestCase):
         self.assertEqual((saved["skipped"], saved["decision_p"]), (False, 0.84))
 
 
+NIGHT_MS = int(datetime(2026, 10, 8, 23, 30, tzinfo=TZ).timestamp() * 1000)
+DAY_MS = int(datetime(2026, 10, 8, 14, 5, tzinfo=TZ).timestamp() * 1000)
+
+
+class DeciderFlowTest(unittest.TestCase):
+    """app.handle_event asks Decider once per described motion event and hands the answer to the bridge."""
+
+    class Decide:
+        def __init__(self, answer):
+            self.answer, self.calls = answer, []
+
+        def choose(self, state, instructions, options):
+            self.calls.append((state, instructions, options))
+            return self.answer
+
+    class Alerter:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, subject, body):
+            self.sent.append((subject, body))
+            return True
+
+    def handle(self, event_type, start_ms, description, answer, sub_type=None):
+        store, alerter, decide = Store(":memory:"), self.Alerter(), self.Decide(answer)
+        ev = {"id": "e1", "device_id": "d1", "start_ms": start_ms, "end_ms": start_ms + 10_000,
+              "event_type": event_type, "sub_type": sub_type, "source": "poll"}
+        store.begin(ev, "Front Door")
+        app.handle_event(ev, "Front Door", store, alerter, Settings(), TZ, describe=lambda e: description,
+                         bridge=Bridge(CONFIG, LocalPublisher(VirtualDevices(CONFIG))), decide=decide)
+        row = store.db.execute("SELECT decision, decision_p FROM events WHERE id='e1'").fetchone()
+        automations = [r[0] for r in store.db.execute("SELECT automation FROM actions ORDER BY id")]
+        return decide, tuple(row), automations, alerter.sent[0][1]
+
+    def test_night_person_is_asked_once_stored_flashed_and_emailed(self):
+        answer = {"label": "person", "p": 0.9, "probabilities": {"person": 0.9}}
+        decide, decision, automations, body = self.handle("motion_detected", NIGHT_MS, "A man stands at the door.",
+                                                          answer, sub_type="human")
+        self.assertEqual(decide.calls, [('Doorbell camera "Front Door" saw motion at 23:30 (night). '
+                                         "Ring's label: human. AI description of the camera frame: A man stands at the door.",
+                                         SEEN_QUESTION, SEEN_OPTIONS)])
+        self.assertEqual(decision, ("person", 0.9))
+        self.assertEqual(automations, ["Visitor at night"] * 3)
+        self.assertIn("Decider: person (0.90)", body)
+
+    def test_day_state_text(self):
+        decide, *_ = self.handle("motion_detected", DAY_MS, "A cat.", {"label": "animal", "p": 0.8, "probabilities": {}})
+        self.assertIn("saw motion at 14:05 (day). Ring's label: none.", decide.calls[0][0])
+
+    def test_doorbell_is_never_asked(self):
+        decide, decision, automations, body = self.handle("button_press", NIGHT_MS, "A man stands at the door.",
+                                                          {"label": "person", "p": 0.9, "probabilities": {}})
+        self.assertEqual((decide.calls, decision, automations), ([], (None, None), ["Visual doorbell"]))
+        self.assertNotIn("Decider:", body)
+
+    def test_no_description_is_never_asked(self):
+        decide, decision, automations, _ = self.handle("motion_detected", NIGHT_MS, None,
+                                                       {"label": "person", "p": 0.9, "probabilities": {}})
+        self.assertEqual((decide.calls, decision, automations), ([], (None, None), []))
+
+    def test_decider_down_falls_back_to_keywords(self):
+        decide, decision, automations, body = self.handle("motion_detected", NIGHT_MS, "A man stands at the door.", None)
+        self.assertEqual(len(decide.calls), 1)
+        self.assertEqual((decision, automations), ((None, None), ["Visitor at night"] * 3))
+        self.assertNotIn("Decider:", body)
+
+
 class IotCoreTest(unittest.TestCase):
     def test_publishes_json_qos1_to_ats_endpoint(self):
         class StubData:
@@ -284,6 +353,48 @@ class EndToEndTest(SimTestCase):
         doorbell = next(b for s, b in bodies if s.startswith("PorchLink: Doorbell"))
         self.assertIn("Home actions:", doorbell)
         self.assertIn("Living room light flash x3 (Visual doorbell)", doorbell)
+
+    def test_scenario_with_decider_picks_the_patterns(self):
+        ring = self.start()
+        where = {e["id"]: (e["device"], os.path.basename(e["image_path"] or "")) for e in self.fake.events}
+        text = {("sim.device.front", "person.jpg"): "A courier is holding a box at the door.",
+                ("sim.device.front", "package.jpg"): "A box sits on the doorstep.",
+                ("sim.device.back", "empty_porch.jpg"): "Nothing notable.",
+                ("sim.device.back", "vehicle.jpg"): "A silver car is parked in the driveway.",
+                ("sim.device.back", "person.jpg"): "A figure in a dark coat stands by the fence."}
+        answers = {"A courier is holding a box at the door.": ("person", 0.9), "A box sits on the doorstep.": ("package", 0.93),
+                   "Nothing notable.": ("nothing", 0.85), "A silver car is parked in the driveway.": ("vehicle", 0.92),
+                   "A figure in a dark coat stands by the fence.": ("person", 0.45)}
+
+        class Decide:
+            def __init__(self):
+                self.asked = []
+
+            def choose(self, state, instructions, options):
+                self.asked.append(state)
+                label, p = next(v for k, v in answers.items() if state.endswith(k))
+                return {"label": label, "p": p, "probabilities": {label: p}}
+
+        class Alerter:
+            def send(self, subject, body):
+                return True
+
+        store, decide = Store(":memory:"), Decide()
+        bridge = Bridge(CONFIG, LocalPublisher(VirtualDevices(CONFIG)))
+        worker = EventWorker(store, app.make_process(store, Alerter(), Settings(), TZ, bridge=bridge, decide=decide,
+                                                     describe=lambda ev: text.get(where.get(ev["id"]))))
+        app.poll_once(ring, store, worker.handle)
+
+        fired = dict(store.db.execute("SELECT automation, COUNT(*) FROM actions GROUP BY automation").fetchall())
+        self.assertEqual(fired, {"Visitor by day": 1,             # 22:50 courier, before the 23:00 night window
+                                 "Visual doorbell": 1,            # 22:52, Decider not asked
+                                 "Package porch light": 1,        # 23:05
+                                 "Night vehicle floodlight": 1,   # 23:11
+                                 "Not sure": 1})                  # 23:12 figure by the fence, p 0.45
+        self.assertEqual(len(decide.asked), 5)  # not the doorbell press, not the live view (no description)
+        rows = store.db.execute("SELECT decision, decision_p FROM events WHERE decision IS NOT NULL ORDER BY start_ms")
+        self.assertEqual([tuple(r) for r in rows], [("person", 0.9), ("package", 0.93), ("nothing", 0.85),
+                                                    ("vehicle", 0.92), ("person", 0.45)])
 
 
 if __name__ == "__main__":

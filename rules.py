@@ -44,7 +44,7 @@ def evaluate(ev, recent_starts, last_burst_start, s, tz):
     return reasons
 
 
-def format_alert(ev, name, reasons, tz, description=None, actions=()):
+def format_alert(ev, name, reasons, tz, description=None, actions=(), decision=None):
     local = datetime.fromtimestamp(ev["start_ms"] / 1000, tz)
     secs = max(0, round((ev["end_ms"] - ev["start_ms"]) / 1000))
     kinds = {k for k, _ in reasons}
@@ -52,7 +52,10 @@ def format_alert(ev, name, reasons, tz, description=None, actions=()):
                 else "Person" if "person" in kinds else "Activity")
     subject = f"PorchLink: {headline} at {name}, {local:%I:%M %p}"
     kind = ev["event_type"] + (f" ({ev['sub_type']})" if ev.get("sub_type") else "")
-    seen = [f"Camera (AI description): {description}", ""] if description else []
+    seen = [f"Camera (AI description): {description}"] if description else []
+    if decision:
+        seen.append(f"Decider: {decision['label']} ({decision['p']:.2f})")
+    seen += [""] if seen else []
     body = "\n".join([*seen, f"Where: {name}", f"When:  {local:%a %d %b, %I:%M:%S %p %Z}",
                       f"How long: {secs} seconds", f"Type: {kind}", "",
                       *[f"- {r}" for _, r in reasons],

@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from alerts import EmailAlerter
 from bridge import Bridge, IotCorePublisher, LocalPublisher, MqttPublisher, VirtualDevices, describe_action, load_config
-from decider import DEFAULT_MIN_P
+from decider import DEFAULT_MIN_P, SEEN_OPTIONS, SEEN_QUESTION, state_text
 from ring_client import FakeRing, RingClient, TokenExpired, device_name, parse_event
 from rules import Settings, evaluate, format_alert, is_night
 from store import Store
@@ -39,20 +39,29 @@ def settings_from_env(env):
                     alert_every_event=env.get("ALERT_EVERY_EVENT", "1") == "1")
 
 
-def handle_event(ev, name, store, alerter, settings, tz, describe=None, bridge=None):
-    """Apply rules to one new event, run home automations, send one email, record everything.
-    describe(ev) is optional (Bedrock); it runs only for events that will alert, to keep cost down."""
+def handle_event(ev, name, store, alerter, settings, tz, describe=None, bridge=None, decide=None):
+    """Apply rules to one new event, ask Decider what is at the door, run home automations, send one email,
+    record everything. describe(ev) is optional (Bedrock); it runs only for events that will alert, to keep
+    cost down. decide (a DeciderClient) is optional; it is asked once per described event, never for a doorbell press."""
     recent = store.starts_since(ev["device_id"], ev["start_ms"] - settings.burst_minutes * 60_000)
     reasons = evaluate(ev, recent, store.last_alert_start(ev["device_id"], "burst"), settings, tz)
     if not reasons:
         return
+    kinds = {k for k, _ in reasons}
     description = describe(ev) if describe else None
     if description:
         store.set_description(ev["id"], description)
-    actions = bridge.run(ev, {k for k, _ in reasons}, description, name) if bridge else []
+    decision = None
+    if decide and description and "doorbell" not in kinds:
+        local = datetime.fromtimestamp(ev["start_ms"] / 1000, tz)
+        decision = decide.choose(state_text(name, f"{local:%H:%M}", "night" in kinds, ev.get("sub_type"), description),
+                                 SEEN_QUESTION, SEEN_OPTIONS)
+        if decision:
+            store.set_decision(ev["id"], decision["label"], decision["p"])
+    actions = bridge.run(ev, kinds, description, name, decision) if bridge else []
     if actions:
         store.add_actions(ev["id"], actions)
-    subject, body = format_alert(ev, name, reasons, tz, description, [describe_action(a) for a in actions])
+    subject, body = format_alert(ev, name, reasons, tz, description, [describe_action(a) for a in actions], decision)
     delivered = alerter.send(subject, body)
     for kind, reason in reasons:
         store.add_alert(ev, kind, reason, delivered)
@@ -74,10 +83,10 @@ class DeviceNames:
         return self.names.get(device_id, f"Ring device ...{device_id[-6:]}")
 
 
-def make_process(store, alerter, settings, tz, describe=None, bridge=None):
-    """The worker's per-event step: rules, home actions, email, records."""
+def make_process(store, alerter, settings, tz, describe=None, bridge=None, decide=None):
+    """The worker's per-event step: rules, Decider, home actions, email, records."""
     def process(ev, name):
-        handle_event(ev, name, store, alerter, settings, tz, describe, bridge)
+        handle_event(ev, name, store, alerter, settings, tz, describe, bridge, decide)
     return process
 
 
@@ -174,11 +183,11 @@ def main():
         from decider import DeciderClient
         decide = DeciderClient(env)
         # The first call after a server start is slow (86 s measured on CPU); take it now, not on a real event.
-        threading.Thread(target=decide, args=("Warm-up.", {"warm_up": {"question": "Is this a warm-up?"}}),
+        threading.Thread(target=decide.choose, args=("Warm-up.", "Is this a warm-up?", {"yes": "it is", "no": "it is not"}),
                          daemon=True).start()
     bridge = Bridge(config, publisher, min_p=float(env.get("DECIDER_MIN_P", DEFAULT_MIN_P)))
 
-    worker = EventWorker(store, make_process(store, alerter, settings, tz, describe, bridge),
+    worker = EventWorker(store, make_process(store, alerter, settings, tz, describe, bridge, decide),
                          name_for=DeviceNames(ring)).start()
     webhook_secret = env.get("RING_WEBHOOK_SECRET", "")
     health = {}

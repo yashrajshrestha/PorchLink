@@ -39,6 +39,11 @@ class Store:
                     self.db.execute(f"ALTER TABLE events ADD COLUMN {column} {kind}")
                 except sqlite3.OperationalError:
                     pass
+            for column, kind in (("decision", "TEXT"), ("decision_p", "REAL")):  # Decider's answer: top option and its p
+                try:
+                    self.db.execute(f"ALTER TABLE events ADD COLUMN {column} {kind}")
+                except sqlite3.OperationalError:
+                    pass
 
     def add_actions(self, event_id, results):
         with self.lock, self.db:
@@ -64,6 +69,10 @@ class Store:
     def set_description(self, event_id, text):
         with self.lock, self.db:
             self.db.execute("UPDATE events SET description=? WHERE id=?", (text, event_id))
+
+    def set_decision(self, event_id, label, p):
+        with self.lock, self.db:
+            self.db.execute("UPDATE events SET decision=?, decision_p=? WHERE id=?", (label, p, event_id))
 
     _INSERT_EVENT = ("INSERT OR IGNORE INTO events (id, device_id, device_name, start_ms, end_ms, event_type, sub_type,"
                      " source, status, attempts) VALUES (?,?,?,?,?,?,?,?,?,?)")
