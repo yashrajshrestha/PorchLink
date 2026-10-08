@@ -21,6 +21,7 @@ RING_TOKEN=<playground token> python3 app.py
 ```
 
 Dashboard: http://127.0.0.1:8080 (virtual lights update every second, plus the event timeline)
+Preview the dashboard without Ring or AWS (every light state + sample events): `python3 dashboard_preview.py`, then open http://127.0.0.1:8090
 
 ## Home actions (`bridge.py`, `automations.json`)
 

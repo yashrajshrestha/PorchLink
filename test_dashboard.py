@@ -189,6 +189,16 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(d["pulsing"])
         self.assertEqual(d["last"]["label"], "Not sure")
 
+    def test_page_is_the_night_dashboard(self):
+        self.start()
+        code, ctype, body = self.get("/")
+        self.assertEqual((code, ctype), (200, "text/html; charset=utf-8"))
+        for marker in ('id="tiles"', 'id="events"', 'id="legend"', 'id="status-text"',
+                       "Door events · last 24 hours", "/api/status", "#0e1116", "prefers-reduced-motion"):
+            self.assertIn(marker, body)
+        self.assertNotIn("location.reload", body)  # live updates, no page reloads
+        self.assertNotIn("<script src", body)      # everything inline
+
 
 if __name__ == "__main__":
     unittest.main()

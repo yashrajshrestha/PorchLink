@@ -1,6 +1,5 @@
 """Local web dashboard: the home's lights (virtual devices) and the last 24 hours of door events."""
-import html, json, re, time
-from datetime import datetime
+import json, re, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from bridge import describe_action
@@ -55,29 +54,105 @@ def summarize(e, actions):
         chip = {"kind": "skip", "text": "no action"}
     return {"headline": headline, "detail": detail, "chip": chip, "icon": icon}
 
-PAGE = """<!doctype html><html><head><meta charset="utf-8">
+PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>PorchLink</title>
 <style>
-body{{font:15px system-ui;margin:24px;max-width:860px;background:#fafafa;color:#1d1d1f}}
-table{{border-collapse:collapse;width:100%;background:#fff}} td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}
-.alert{{color:#b3261e;font-weight:600}} small{{color:#555}} .act{{color:#0b6b3a}}
-#devices{{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin:12px 0 24px}}
-.dev{{background:#fff;border:1px solid #ddd;border-radius:12px;padding:14px}}
-.bulb{{font-size:38px;filter:grayscale(1) opacity(.35)}} .on .bulb{{filter:none;text-shadow:0 0 18px #ffd60a}}
-.flash .bulb{{animation:f .5s steps(1) infinite}} @keyframes f{{50%{{filter:grayscale(1) opacity(.35)}}}}
-</style></head><body><h1>PorchLink</h1>
-{devices_block}
-<h2>Door events (last 24 hours)</h2>
-<table><tr><th>Time</th><th>Where</th><th>Length</th><th>Alert and home actions</th></tr>{rows}</table>
-<script>
-async function tick(){{
-  const box=document.getElementById('devices'); if(!box) return;
-  const ds=await (await fetch('/api/devices')).json();
-  box.innerHTML=ds.map(d=>`<div class="dev ${{d.flashing?'flash':d.on?'on':''}}"><div class="bulb">💡</div>
-    <b>${{d.name}}</b><br><small>${{d.flashing?'flashing':d.on?'ON, '+Math.ceil(d.seconds_left/60)+' min left':'off'}}</small>
-    ${{d.last?'<br><small>last: '+d.last.automation+'</small>':''}}</div>`).join('');
-}}
-tick(); setInterval(tick,1000); setTimeout(()=>location.reload(),15000);
+:root{--bg:#0e1116;--card:#171b22;--line:#262c36;--text:#e8e6e1;--muted:#9aa3b2;--amber:#ffc24d;--glow:255,176,32}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:28px 24px 48px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+.brand{font-size:26px;font-weight:800;letter-spacing:-.01em}.brand span{color:var(--amber)}
+.status{display:flex;gap:10px;align-items:center;font-size:14px;color:var(--muted)}
+.dot{width:10px;height:10px;border-radius:50%;background:#6b7280}
+.dot.ok{background:#34d399;box-shadow:0 0 8px #34d399}.dot.bad{background:#f87171;box-shadow:0 0 8px #f87171}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:20px;min-height:168px;transition:background .3s,border-color .3s}
+.bulb{width:64px;height:64px;border-radius:50%;background:#232833;border:2px solid #2f3643;margin-bottom:16px}
+.room{font-size:14px;color:var(--muted);font-weight:600}
+.state{font-size:24px;font-weight:800;margin-top:2px}
+.why{font-size:13px;color:var(--muted);margin-top:4px;min-height:1.2em}
+.tile.on{border-color:#5a4416;background:linear-gradient(180deg,#241d0f,var(--card) 70%)}
+.tile.on .bulb,.tile.flash .bulb{background:radial-gradient(circle at 40% 35%,#fff4c2,#ffbf3a 50%,#e8870b);border-color:#ffb020}
+.tile.on .bulb{animation:breathe 2.4s ease-in-out infinite}
+.tile.flash{border-color:#6b4f12;background:linear-gradient(180deg,#2a210f,var(--card) 70%)}
+.tile.flash .bulb{animation:flash .6s steps(1) infinite}
+.tile.pulse .bulb{background:radial-gradient(circle at 40% 35%,#fff8de,#ffd98a 55%,#d8a33c);border-color:#c99a3a;animation:pulse 2.6s ease-in-out infinite}
+.tile.on .state,.tile.flash .state{color:var(--amber)}.tile.pulse .state{color:#f3d58c}
+@keyframes breathe{0%,100%{box-shadow:0 0 22px 6px rgba(var(--glow),.5)}50%{box-shadow:0 0 44px 14px rgba(var(--glow),.9)}}
+@keyframes flash{0%,49%{opacity:1}50%,100%{opacity:.2}}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,214,120,0);opacity:.55}50%{box-shadow:0 0 28px 8px rgba(255,214,120,.6);opacity:1}}
+@media (prefers-reduced-motion:reduce){.tile .bulb{animation:none!important}.tile.flash .bulb{box-shadow:0 0 0 6px rgba(var(--glow),.9)}}
+.legend{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:18px}
+.legend i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:7px;vertical-align:-1px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:30px 0 12px;font-weight:700}
+.ev{display:flex;gap:14px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 14px;margin-bottom:9px}
+.icon{width:52px;height:52px;border-radius:12px;flex:none;display:grid;place-items:center;font-size:26px;background:#20252e}
+.ev b{font-size:16px}.meta{font-size:13px;color:var(--muted)}
+.chip{margin-left:auto;font-size:12px;font-weight:700;border-radius:999px;padding:4px 11px;white-space:nowrap}
+.chip.rule{background:#3a2a0b;color:#ffc24d}.chip.ai{background:#14233d;color:#8db4ff}
+.chip.skip{background:#1f242d;color:#9aa3b2}.chip.unsure{background:#33290f;color:#f3d58c}
+.empty,.note{color:var(--muted);background:var(--card);border:1px dashed var(--line);border-radius:16px;padding:18px;text-align:center}
+@media (max-width:560px){main{padding:18px 14px}.ev{flex-wrap:wrap}.chip{margin-left:66px}}
+</style></head><body><main>
+<div class="top"><div class="brand">Porch<span>Link</span></div>
+<div class="status"><span class="dot" id="dot"></span><span id="status-text">Connecting…</span></div></div>
+<div class="grid" id="tiles"></div>
+<div class="legend" id="legend"><span><i style="background:#ffbf3a"></i>On (steady glow)</span>
+<span><i style="background:#ffbf3a;opacity:.5"></i>Flashing = doorbell or alert</span>
+<span><i style="background:#ffd98a"></i>Gentle pulse = AI not sure</span><span><i style="background:#2f3643"></i>Off</span></div>
+<h2>Door events · last 24 hours</h2>
+<div id="events"><div class="empty">No events yet.</div></div>
+</main><script>
+const ICON={doorbell:"🔔",package:"📦",vehicle:"🚗",person:"🧍",animal:"🐾",motion:"👣",live:"📹"};
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const clock=ms=>new Date(ms).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});
+const tilesEl=document.getElementById("tiles"),eventsEl=document.getElementById("events");
+let lastEvents="";
+function view(d){
+  const label=d.last&&d.last.label, s=d.seconds_left;
+  if(d.flashing)return{cls:"flash",state:label||"Alert!",why:"flashing · just now"};
+  if(d.pulsing)return{cls:"pulse",state:label||"Not sure",why:"gentle pulse · check camera"};
+  if(d.on)return{cls:"on",state:label||"On",why:"amber · "+(s>=60?Math.ceil(s/60)+" min left":s+" s left")};
+  return{cls:"",state:"Off",why:""};
+}
+function setText(el,sel,text){const n=el.querySelector(sel);if(n.textContent!==text)n.textContent=text;}
+function renderTiles(ds){
+  if(!ds.length){tilesEl.innerHTML='<div class="note">Lights are on AWS IoT Core: see their state in the IoT console</div>';return;}
+  const note=tilesEl.querySelector(".note");if(note)note.remove();
+  for(const d of ds){
+    let el=tilesEl.querySelector('[data-id="'+CSS.escape(d.id)+'"]');
+    if(!el){el=document.createElement("div");el.dataset.id=d.id;el.dataset.testid="tile-"+d.id;
+      el.innerHTML='<div class="bulb"></div><div class="room"></div><div class="state"></div><div class="why"></div>';tilesEl.appendChild(el);}
+    const v=view(d),cls=("tile "+v.cls).trim();
+    if(el.className!==cls)el.className=cls;  // only the class changes, so the bulb's animation keeps running
+    setText(el,".room",d.name);setText(el,".state",v.state);setText(el,".why",v.why);
+  }
+}
+function eventRow(e){
+  const s=e.summary,meta=[e.device_name||"",clock(e.start_ms),s.detail].filter(Boolean).map(esc).join(" · ");
+  return '<div class="ev" data-testid="event"><div class="icon" aria-hidden="true">'+(ICON[s.icon]||ICON.motion)+
+    '</div><div><b>'+esc(s.headline)+'</b><div class="meta">'+meta+'</div></div><span class="chip '+esc(s.chip.kind)+'">'+esc(s.chip.text)+'</span></div>';
+}
+function renderStatus(st){
+  document.getElementById("dot").className="dot "+(st.ring_ok===false?"bad":st.ring_ok?"ok":"");
+  const ring=st.ring_ok===false?"Ring not reachable":st.ring_ok?"Ring connected":(st.mode||"Starting");
+  const when=st.day&&st.time?st.day+" "+st.time:"",phase=st.night==null?"":(st.night?"Night":"Day");
+  document.getElementById("status-text").textContent=[ring,when,phase].filter(Boolean).join(" · ");
+}
+async function tick(){
+  try{
+    const [ds,evs,st]=await Promise.all(["/api/devices","/api/events","/api/status"].map(u=>fetch(u).then(r=>r.json())));
+    renderTiles(ds);document.getElementById("legend").hidden=!ds.length;
+    const key=JSON.stringify(evs);
+    if(key!==lastEvents){lastEvents=key;eventsEl.innerHTML=evs.length?evs.map(eventRow).join(""):'<div class="empty">No events yet.</div>';}
+    renderStatus(st);
+  }catch(err){
+    document.getElementById("dot").className="dot bad";
+    document.getElementById("status-text").textContent="Dashboard lost connection to PorchLink";
+  }
+}
+tick();setInterval(tick,1000);
 </script></body></html>"""
 
 
@@ -133,10 +208,7 @@ def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret
                     out.append({**e, "actions": acts, "summary": summarize(e, acts)})
                 self._send(200, "application/json", json.dumps(out))
             elif self.path == "/":
-                block = ('<h2>Home</h2><div id="devices"></div>' if devices else
-                         "<p><small>Devices are on AWS IoT Core: see their state in the IoT console.</small></p>")
-                rows = "".join(row(e, acts_by_event.get(e["id"], [])) for e in items) or "<tr><td colspan=4>No events yet.</td></tr>"
-                self._send(200, "text/html; charset=utf-8", PAGE.format(devices_block=block, rows=rows))
+                self._send(200, "text/html; charset=utf-8", PAGE)
             else:
                 self._send(404, "text/plain", "not found")
 
@@ -152,21 +224,6 @@ def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret
 
         def log_message(self, *args):  # keep the poller output readable
             pass
-
-    def row(e, actions):
-        when = datetime.fromtimestamp(e["start_ms"] / 1000, tz).strftime("%I:%M:%S %p")
-        secs = max(0, round((e["end_ms"] - e["start_ms"]) / 1000))
-        kinds = [k for k in (e["kinds"] or "").split(",") if k and k != "activity"]
-        how = "" if not e["kinds"] else (" (emailed)" if e["delivered"] else " (printed only)")
-        label = html.escape(", ".join(kinds)) if kinds else ("activity" if e["kinds"] else "")
-        alert = f'<span class="alert">{label}</span>{how}' if kinds else f"{label}{how}"
-        seen = f"<br><small>{html.escape(e['description'])}</small>" if e.get("description") else ""
-        names = {d["id"]: d["name"] for d in (devices.snapshot() if devices else [])}
-        acts = "".join(
-            f'<br><small class="act">→ {html.escape(describe_action({**a, "device_name": names.get(a["device"], a["device"])}))}</small>'
-            for a in actions)
-        return (f"<tr><td>{when}</td><td>{html.escape(e['device_name'] or '')}</td>"
-                f"<td>{secs} s</td><td>{alert}{seen}{acts}</td></tr>")
 
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)
 
