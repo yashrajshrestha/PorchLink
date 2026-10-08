@@ -6,3 +6,4 @@ spike_results.json
 *.jpg
 !sim/images/*.jpg
 .superpowers/
+.venv-decider/

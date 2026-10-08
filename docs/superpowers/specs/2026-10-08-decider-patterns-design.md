@@ -1,0 +1,112 @@
+# Decider picks the light pattern — design
+
+**Date:** 2026-10-08 · **Status:** approved in chat. The user approved the diagram (`docs/diagrams/decider-design.html`), "gentle pulse" when unsure, and "start the decider work". · **Branch:** `feat/decider-patterns` · **Hackathons:** Ring track (Oct 23) and Agent Experience / Strands Decider (Oct 30).
+
+## Goal
+
+For each motion event, Strands Decider answers one question: **what is at the door?** Simple, editable rules then turn the answer and the time of day into a light pattern. A doorbell press always flashes, without AI. When Decider isn't sure, the house gives a gentle pulse. A confident "nothing" (a cat, a pizza box, a sign) does nothing, and the dashboard shows "false alarm skipped".
+
+Out of scope:
+- Running Decider on AWS (SageMaker endpoint, days 7–8).
+- Bedrock Nova on real snapshots (days 7–8). Until then descriptions come from the simulator stub or Ollama.
+- Watch live (day 9).
+- Decider looking at images directly. This is an optional experiment in the eval script only.
+
+## Decision flow (per event, inside the worker)
+
+1. **Doorbell press** (`button_press` → alert kind `doorbell`): the existing "Visual doorbell" automation flashes ×3. **Decider is not called.**
+2. **Motion with a description** (Nova, Ollama or a stub). Ask Decider one `choice` question:
+   - **State text:** `Doorbell camera "<name>" saw motion at <HH:MM> (<day|night>). Ring's label: <sub_type or "none">. AI description of the camera frame: <description>`
+   - **Question `seen`:** "What is at the door in this camera frame?"
+   - **Options and criteria** (exact):
+     - `package`: "a delivered package, parcel or shipping box is visible"
+     - `person`: "a person is at the door or on the property"
+     - `vehicle`: "a car, truck, van or other vehicle is in the driveway"
+     - `animal`: "only an animal such as a cat, dog or bird is visible"
+     - `nothing`: "nothing that needs attention: an empty porch, shadows, a sign, food, toys or a box that is not a delivery"
+   - The answer is the top option and its probability, recorded on the event as `decision` and `decision_p`.
+3. **Rules.** Automations in `automations.json` gain two conditions, ANDed with the existing ones:
+   - `seen`: a list of options; matches when Decider's top option is listed and its p ≥ `min_p` (default `DECIDER_MIN_P` = 0.8).
+   - `time`: `"day"` or `"night"`; `"night"` means the alert kinds include `night`.
+4. **Unsure.** When the top p < `min_p`, no `seen` automation matches. Instead, the automation marked `"when": {"unsure": true}` fires: a gentle `pulse` on the living-room light, label "Not sure". This applies whatever the top option is, so a real visitor is never silently missed.
+5. **Fallback.** When Decider is off or unreachable, or there is no description:
+   - Automations match on their existing `description_has` keywords, as today.
+   - `seen` and `unsure` conditions are ignored.
+   - The event records no decision.
+   - The house never goes silent because the AI is down.
+
+### Shipped rules (`automations.json`)
+
+| Automation | when | do | label |
+|---|---|---|---|
+| Visual doorbell | kind doorbell | living-room flash ×3 | Doorbell! |
+| Package porch light | seen package (fallback: description_has package/box/parcel) | porch on 10 min, cooldown 10 min | Package |
+| Visitor at night | seen person, time night (fallback: kind night + description_has person/people/man/woman/courier) | flash ×3 on hallway + living room + porch | Someone outside |
+| Visitor by day | seen person, time day | living-room pulse 10 s | Visitor |
+| Night vehicle floodlight | seen vehicle, time night (fallback: kind night + description_has car/vehicle/truck/van) | floodlight on 3 min | Car arriving |
+| Not sure | unsure | living-room pulse 10 s | Not sure |
+
+The old "Night path light" (any night motion → hallway on) is **removed**: under Decider it would fire for cats. Its intent is covered by "Visitor at night". The per-automation yes/no `ask` questions are **replaced** by the single `seen` question, and `bridge.py`'s `ask` handling is removed.
+
+## Components
+
+- **`decider.py`:** `DeciderClient.choose(state, instructions, options) -> {"label", "p", "probabilities"} | None`. It POSTs one `choice` question to `/v1/systemone`. Any failure returns None and logs `(decider skipped: …)`. The warm-up call uses `choose`.
+- **`bridge.py`:**
+  - `Bridge.plan` and `Bridge.run` take a `decision` (the `choose` result or None) instead of calling Decider per automation.
+  - `matches()` learns `seen`, `time` and `unsure`.
+  - Results carry `decision_p` (top p) when the automation used `seen` or `unsure`.
+  - Cooldowns are unchanged.
+- **`app.handle_event`:**
+  - It builds the state text.
+  - It calls `decide.choose(...)` once per motion event that has a description. Doorbell presses never call it.
+  - It stores the decision (`store.set_decision(event_id, label, p)`) and passes it to `bridge.run`.
+  - The email gains a line `Decider: <label> (<p>)`.
+- **`store.py`:** new `events` columns `decision TEXT` and `decision_p REAL`, using the existing migration pattern, plus `set_decision`. `timeline()` returns them.
+- **`web.summarize`:** uses the event-level decision when present.
+  - **Chip text:** `Decider: <label> <p>`, for example "Decider: package 0.93".
+  - **Chip kind:**
+    - `unsure` when p < 0.8;
+    - `skip` when the label is `nothing` or `animal` and no action ran, with detail "false alarm skipped";
+    - `ai` otherwise when an action ran.
+  - Action-level `decision_p` still works for old rows.
+
+## Evidence for judges
+
+- **`eval_decider.py`** runs a labelled set against a running Decider server and writes `docs/decider-eval.md`. The set is about 40 Nova-style descriptions in `eval/decider_cases.json`, each with an expected label, and covers:
+  - packages, including "a box held by a courier";
+  - people by day and at night;
+  - vehicles;
+  - animals;
+  - false alarms: pizza box, cardboard sign, shadow, empty porch, toy;
+  - ambiguous cases.
+- The report gives:
+  - accuracy per class and a confusion table;
+  - how often it was unsure (below 0.8);
+  - p50 and p95 latency;
+  - the hardware, recorded honestly.
+- **Optional `--vision`:** compares Decider reading the simulator's images directly against reading the descriptions.
+
+## Testing
+
+All tests are offline; Decider is stubbed in unit tests.
+
+- **`choose`:** request shape, parsing the top option, failure returns None.
+- **Bridge:**
+  - `seen` matches at p ≥ min_p and not below;
+  - `time` day/night;
+  - `unsure` fires only when a decision exists and p < min_p;
+  - the fallback to `description_has` when the decision is None;
+  - a doorbell never needs a decision;
+  - cooldowns are unchanged.
+- **`handle_event`:**
+  - one `choose` call per motion event with a description;
+  - none for a doorbell;
+  - the decision is stored and shows in `/api/events` with the right chip.
+- **End to end (simulator scenario with a stub Decider keyed by image):**
+  - package → porch;
+  - car at night → floodlight;
+  - person at night → three lights flash;
+  - an ambiguous frame → pulse;
+  - empty porch → nothing, with chip "false alarm skipped".
+- **Eval script:** a unit test of its scoring on a tiny fixed answer set (no server).
+- The existing tests are updated where they used `ask`.
