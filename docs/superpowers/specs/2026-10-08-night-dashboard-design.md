@@ -52,15 +52,15 @@ Out of scope:
   - `live` for `on_demand`;
   - else `motion`.
 - **Detail:**
-  - the actions that ran, each described with `describe_action`, joined with "; ";
+  - every action that was not skipped, each described with `describe_action` (failed ones end in "- FAILED"), joined with "; ";
+  - "false alarm skipped" when Decider confidently said no (see Chip);
   - "nothing done" when the event alerted but no action ran;
   - "recorded at startup" for `history` events;
   - "" otherwise.
 - **Chip:**
   - When any action carries `decision_p`, using the highest p:
-    - `unsure` "Decider 0.61" if p < 0.8;
-    - else `ai` "Decider 0.93" if an action ran;
-    - else `skip` "Decider 0.88".
+    - if an action ran: `ai` "Decider 0.93" when p ≥ 0.8 (`CHIP_SURE`), otherwise `unsure` (a pulse fired for an unsure case);
+    - if none ran: `skip` "Decider 0.05" when p < 0.5 (`CHIP_NO`; a confident "no", detail "false alarm skipped"), otherwise `unsure` "Decider 0.61".
   - Else, in this order:
     - a doorbell event → `rule` "rule · no AI";
     - an action ran → `rule` "rule";

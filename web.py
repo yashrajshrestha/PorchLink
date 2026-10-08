@@ -8,6 +8,7 @@ from webhooks import parse_webhook, verify_signature
 MAX_WEBHOOK_BYTES = 65_536  # Ring webhooks are small; refuse anything bigger before reading it
 REQUEST_TIMEOUT = 10  # seconds a client may stall on the socket before its connection is dropped
 CHIP_SURE = 0.8  # Decider answers below this are "not sure": the house gives a gentle pulse
+CHIP_NO = 0.5  # with nothing fired, Decider answers below this are a confident "no": a skipped false alarm
 
 _ICON_WORDS = (("package", r"packages?|parcels?|box(es)?"), ("vehicle", r"cars?|vehicles?|trucks?|vans?"),
                ("animal", r"cats?|dogs?|animals?|birds?"), ("person", r"person|people|man|woman|courier"))
@@ -19,7 +20,8 @@ def summarize(e, actions):
     kinds = [k for k in (e.get("kinds") or "").split(",") if k]
     description = (e.get("description") or "").strip()
     text = description.lower()
-    fired = [a for a in actions if a.get("ok") and not a.get("skipped")]
+    ran = [a for a in actions if not a.get("skipped")]  # includes failed commands, so the page can show FAILED
+    fired = [a for a in ran if a.get("ok")]
     if "doorbell" in kinds:
         headline, icon = "Doorbell pressed", "doorbell"
     elif description:
@@ -32,8 +34,8 @@ def summarize(e, actions):
     else:
         headline, icon = "Motion", "motion"
     history = e.get("status") == "history"
-    if fired:
-        detail = "; ".join(a.get("text") or "" for a in fired)
+    if ran:
+        detail = "; ".join(a.get("text") or "" for a in ran)
     elif history:
         detail = "recorded at startup"
     elif kinds or actions:
@@ -43,7 +45,13 @@ def summarize(e, actions):
     ps = [a["decision_p"] for a in actions if a.get("decision_p") is not None]
     if ps:
         p = max(ps)
-        chip = {"kind": "unsure" if p < CHIP_SURE else ("ai" if fired else "skip"), "text": f"Decider {p:.2f}"}
+        if fired:
+            kind = "ai" if p >= CHIP_SURE else "unsure"
+        else:
+            kind = "skip" if p < CHIP_NO else "unsure"
+        chip = {"kind": kind, "text": f"Decider {p:.2f}"}
+        if kind == "skip" and detail == "nothing done":
+            detail = "false alarm skipped"
     elif "doorbell" in kinds:
         chip = {"kind": "rule", "text": "rule · no AI"}
     elif fired:
@@ -84,6 +92,7 @@ main{max-width:1100px;margin:0 auto;padding:28px 24px 48px}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,214,120,0);opacity:.55}50%{box-shadow:0 0 28px 8px rgba(255,214,120,.6);opacity:1}}
 @media (prefers-reduced-motion:reduce){.tile .bulb{animation:none!important}.tile.flash .bulb{box-shadow:0 0 0 6px rgba(var(--glow),.9)}}
 .legend{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:18px}
+.legend[hidden]{display:none}
 .legend i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:7px;vertical-align:-1px}
 h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:30px 0 12px;font-weight:700}
 .ev{display:flex;gap:14px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 14px;margin-bottom:9px}
@@ -92,6 +101,7 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute
 .chip{margin-left:auto;font-size:12px;font-weight:700;border-radius:999px;padding:4px 11px;white-space:nowrap}
 .chip.rule{background:#3a2a0b;color:#ffc24d}.chip.ai{background:#14233d;color:#8db4ff}
 .chip.skip{background:#1f242d;color:#9aa3b2}.chip.unsure{background:#33290f;color:#f3d58c}
+.grid .note{grid-column:1/-1}
 .empty,.note{color:var(--muted);background:var(--card);border:1px dashed var(--line);border-radius:16px;padding:18px;text-align:center}
 @media (max-width:560px){main{padding:18px 14px}.ev{flex-wrap:wrap}.chip{margin-left:66px}}
 </style></head><body><main>
@@ -145,7 +155,7 @@ async function tick(){
     const [ds,evs,st]=await Promise.all(["/api/devices","/api/events","/api/status"].map(u=>fetch(u).then(r=>r.json())));
     renderTiles(ds);document.getElementById("legend").hidden=!ds.length;
     const key=JSON.stringify(evs);
-    if(key!==lastEvents){lastEvents=key;eventsEl.innerHTML=evs.length?evs.map(eventRow).join(""):'<div class="empty">No events yet.</div>';}
+    if(key!==lastEvents){eventsEl.innerHTML=evs.length?evs.map(eventRow).join(""):'<div class="empty">No events yet.</div>';lastEvents=key;}
     renderStatus(st);
   }catch(err){
     document.getElementById("dot").className="dot bad";

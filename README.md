@@ -21,6 +21,7 @@ RING_TOKEN=<playground token> python3 app.py
 ```
 
 Dashboard: http://127.0.0.1:8080 (virtual lights update every second, plus the event timeline)
+
 Preview the dashboard without Ring or AWS (every light state + sample events): `python3 dashboard_preview.py`, then open http://127.0.0.1:8090
 
 ## Home actions (`bridge.py`, `automations.json`)
@@ -28,6 +29,8 @@ Preview the dashboard without Ring or AWS (every light state + sample events): `
 - Each automation has `when` (all must hold: `kind` such as `night` / `doorbell` / `person` / `burst`,
   `description_has` words from the Bedrock description, optional `source` camera name) and `do`
   (device commands). `cooldown_s` is measured in event time.
+- An automation can have an optional `label`, the word shown on its dashboard tile (for example "Doorbell!").
+- The `pulse` action is a gentle glow, used when the AI isn't sure; it lasts `duration_s` (default 10).
 - Commands are JSON on MQTT topics `porchlink/<device_id>/set`, for example
   `{"action": "on", "duration_s": 300, "automation": "Night path light", ...}`.
 - `BRIDGE=local` (default): virtual lights in this process, shown on the dashboard. No AWS needed.

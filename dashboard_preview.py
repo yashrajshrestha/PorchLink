@@ -13,7 +13,7 @@ from bridge import VirtualDevices, load_config
 from store import Store
 
 TZ = ZoneInfo("Asia/Kathmandu")
-STATES = [("living-room-light", {"action": "flash", "times": 4, "automation": "Visual doorbell", "label": "Doorbell!"}),
+STATES = [("living-room-light", {"action": "flash", "times": 6, "automation": "Visual doorbell", "label": "Doorbell!"}),
           ("porch-light", {"action": "on", "duration_s": 480, "automation": "Package porch light", "label": "Package"}),
           ("floodlight", {"action": "pulse", "duration_s": 6, "automation": "Not sure", "label": "Not sure"})]
 
@@ -26,7 +26,7 @@ def seed(store, now_ms):
          {"automation": "Not sure", "device": "floodlight", "command": {"action": "pulse"}}, 0.61),
         ("p-package", 11, "motion_detected", "A cardboard package sits on the doorstep.", "activity",
          {"automation": "Package porch light", "device": "porch-light", "command": {"action": "on", "duration_s": 600}}, 0.93),
-        ("p-cat", 22, "motion_detected", "A cat walks across the back yard.", "activity", None, 0.88),
+        ("p-cat", 22, "motion_detected", "A cat walks across the back yard.", "activity", None, 0.12),
     ]
     for eid, ago, kind, description, alert, act, p in events:
         start = now_ms - ago * 60_000

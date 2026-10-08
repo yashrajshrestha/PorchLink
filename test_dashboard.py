@@ -93,14 +93,30 @@ class SummarizeTest(unittest.TestCase):
 
     def test_decider_says_no(self):
         s = web.summarize({"kinds": "activity", "event_type": "motion_detected", "description": "A cat walks past."},
-                          [action("left alone", skipped=True, p=0.88)])
-        self.assertEqual((s["icon"], s["chip"], s["detail"]), ("animal", {"kind": "skip", "text": "Decider 0.88"}, "nothing done"))
+                          [action("left alone", skipped=True, p=0.12)])
+        self.assertEqual((s["icon"], s["chip"], s["detail"]),
+                         ("animal", {"kind": "skip", "text": "Decider 0.12"}, "false alarm skipped"))
+
+    def test_chip_rule_by_p_and_whether_an_action_fired(self):
+        chip = lambda p, skipped: web.summarize({"kinds": "activity", "event_type": "motion_detected"},
+                                                [action("x", skipped=skipped, p=p)])["chip"]
+        self.assertEqual(chip(0.05, True), {"kind": "skip", "text": "Decider 0.05"})
+        self.assertEqual(chip(0.61, True), {"kind": "unsure", "text": "Decider 0.61"})
+        self.assertEqual(chip(0.61, False), {"kind": "unsure", "text": "Decider 0.61"})
+        self.assertEqual(chip(0.93, False), {"kind": "ai", "text": "Decider 0.93"})
+        self.assertEqual(chip(0.88, True), {"kind": "unsure", "text": "Decider 0.88"})
 
     def test_highest_p_wins_and_failed_actions_do_not_count(self):
         s = web.summarize({"kinds": "night", "event_type": "motion_detected"},
-                          [action("a", skipped=True, p=0.3), action("b", ok=False, p=0.9)])
-        self.assertEqual(s["chip"], {"kind": "skip", "text": "Decider 0.90"})
-        self.assertEqual(s["detail"], "nothing done")
+                          [action("a", skipped=True, p=0.3), action("b - FAILED", ok=False, p=0.9)])
+        self.assertEqual(s["chip"], {"kind": "unsure", "text": "Decider 0.90"})  # the failed command did not fire
+        self.assertEqual(s["detail"], "b - FAILED")
+
+    def test_failed_command_is_visible_in_the_detail(self):
+        s = web.summarize({"kinds": "doorbell", "event_type": "button_press"},
+                          [action("Living room light flash x3 (Visual doorbell) - FAILED", ok=False)])
+        self.assertIn("FAILED", s["detail"])
+        self.assertEqual(s["chip"], {"kind": "rule", "text": "rule · no AI"})
 
     def test_plain_rule_and_no_action(self):
         ran = web.summarize({"kinds": "night", "event_type": "motion_detected"}, [action("Hallway light ON for 5 min (Night path light)")])
@@ -180,6 +196,20 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(e["summary"]["headline"], "Doorbell pressed")
         self.assertEqual(e["summary"]["chip"]["kind"], "rule")
         self.assertEqual(e["actions"][0]["text"], "Living room light flash x3 (Visual doorbell)")
+
+    def test_decider_no_round_trips_through_the_api(self):
+        self.start()
+        now = int(time.time() * 1000)
+        ev = {"id": "e2", "device_id": "dev1", "start_ms": now, "end_ms": now, "event_type": "motion_detected",
+              "sub_type": None, "source": "poll"}
+        self.store.begin(ev, "Back Yard")
+        self.store.finish("e2", "done")
+        self.store.add_alert(ev, "activity", "Motion.", True)
+        self.store.add_actions("e2", [{"automation": "Package porch light", "device": "lamp", "topic": "porchlink/lamp/set",
+                                       "command": {"action": "on"}, "ok": True, "error": None, "skipped": True,
+                                       "decision_p": 0.12}])
+        [e] = json.loads(self.get("/api/events")[2])
+        self.assertEqual(e["summary"]["chip"], {"kind": "skip", "text": "Decider 0.12"})
 
     def test_devices_report_pulsing(self):
         devices = VirtualDevices(CONFIG)
