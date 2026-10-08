@@ -3,20 +3,21 @@ import json, re, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from bridge import describe_action
+from decider import DEFAULT_MIN_P
 from webhooks import parse_webhook, verify_signature
 
 MAX_WEBHOOK_BYTES = 65_536  # Ring webhooks are small; refuse anything bigger before reading it
 REQUEST_TIMEOUT = 10  # seconds a client may stall on the socket before its connection is dropped
-CHIP_SURE = 0.8  # Decider answers below this are "not sure": the house gives a gentle pulse
-CHIP_NO = 0.5  # with nothing fired, Decider answers below this are a confident "no": a skipped false alarm
+CHIP_SURE = 0.8  # older rows (one yes/no Decider question per automation): below this was "not sure"
+CHIP_NO = 0.5  # older rows: with nothing fired, below this was a confident "no", a skipped false alarm
 
 _ICON_WORDS = (("package", r"packages?|parcels?|box(es)?"), ("vehicle", r"cars?|vehicles?|trucks?|vans?"),
                ("animal", r"cats?|dogs?|animals?|birds?"), ("person", r"person|people|man|woman|courier"))
 
 
-def summarize(e, actions):
+def summarize(e, actions, min_p=DEFAULT_MIN_P):
     """What the dashboard says about one door event: a headline, what the house did, a chip saying who
-    decided (a rule, or Decider and how sure it was) and an icon key. Text is returned raw; the page escapes."""
+    decided (a rule, or Decider's answer and how sure it was) and an icon key. Text is returned raw; the page escapes."""
     kinds = [k for k in (e.get("kinds") or "").split(",") if k]
     description = (e.get("description") or "").strip()
     text = description.lower()
@@ -43,7 +44,18 @@ def summarize(e, actions):
     else:
         detail = ""
     ps = [a["decision_p"] for a in actions if a.get("decision_p") is not None]
-    if ps:
+    if e.get("decision"):
+        label, p = e["decision"], e.get("decision_p") or 0.0
+        if p < min_p:
+            kind = "unsure"  # the "Not sure" pulse fired
+        elif not ran and label in ("nothing", "animal"):
+            kind = "skip"
+        else:
+            kind = "ai"
+        chip = {"kind": kind, "text": f"Decider: {label} {p:.2f}"}
+        if kind == "skip" and detail == "nothing done":
+            detail = "false alarm skipped"
+    elif ps:  # older rows: Decider's p per automation
         p = max(ps)
         if fired:
             kind = "ai" if p >= CHIP_SURE else "unsure"
@@ -166,7 +178,7 @@ tick();setInterval(tick,1000);
 </script></body></html>"""
 
 
-def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret="", log_bodies=False, status=None):
+def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret="", log_bodies=False, status=None, min_p=DEFAULT_MIN_P):
     class Handler(BaseHTTPRequestHandler):
         timeout = REQUEST_TIMEOUT
 
@@ -215,7 +227,7 @@ def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret
                 for e in items:
                     acts = [{**a, "text": describe_action({**a, "device_name": names.get(a["device"], a["device"])})}
                             for a in acts_by_event.get(e["id"], [])]
-                    out.append({**e, "actions": acts, "summary": summarize(e, acts)})
+                    out.append({**e, "actions": acts, "summary": summarize(e, acts, min_p)})
                 self._send(200, "application/json", json.dumps(out))
             elif self.path == "/":
                 self._send(200, "text/html; charset=utf-8", PAGE)
@@ -238,7 +250,7 @@ def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 
-def serve(store, tz, port=8080, enqueue=None, devices=None, webhook_secret="", log_bodies=False, status=None):
-    server = make_server(store, tz, port, enqueue, devices, webhook_secret, log_bodies, status)
+def serve(store, tz, port=8080, enqueue=None, devices=None, webhook_secret="", log_bodies=False, status=None, min_p=DEFAULT_MIN_P):
+    server = make_server(store, tz, port, enqueue, devices, webhook_secret, log_bodies, status, min_p)
     print(f"Dashboard: http://127.0.0.1:{port}")
     server.serve_forever()

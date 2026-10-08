@@ -185,7 +185,8 @@ def main():
         # The first call after a server start is slow (86 s measured on CPU); take it now, not on a real event.
         threading.Thread(target=decide.choose, args=("Warm-up.", "Is this a warm-up?", {"yes": "it is", "no": "it is not"}),
                          daemon=True).start()
-    bridge = Bridge(config, publisher, min_p=float(env.get("DECIDER_MIN_P", DEFAULT_MIN_P)))
+    min_p = float(env.get("DECIDER_MIN_P", DEFAULT_MIN_P))
+    bridge = Bridge(config, publisher, min_p=min_p)
 
     worker = EventWorker(store, make_process(store, alerter, settings, tz, describe, bridge, decide),
                          name_for=DeviceNames(ring)).start()
@@ -193,7 +194,7 @@ def main():
     health = {}
     status = make_status(health, settings, tz, poll_seconds, "FAKE mode" if fake else "Ring API")
     threading.Thread(target=web.serve, args=(store, tz, int(env.get("WEB_PORT", 8080)), worker.submit, devices,
-                                             webhook_secret, env.get("WEBHOOK_LOG") == "1", status), daemon=True).start()
+                                             webhook_secret, env.get("WEBHOOK_LOG") == "1", status, min_p), daemon=True).start()
     print(f"PorchLink | {'FAKE mode' if fake else 'Ring API'} | poll every {poll_seconds}s | "
           f"email {'ON -> ' + alerter.to if alerter.enabled else 'OFF (printing only)'} | "
           f"webhooks {'signed' if webhook_secret else 'OFF (set RING_WEBHOOK_SECRET)'} | "

@@ -19,16 +19,17 @@ STATES = [("living-room-light", {"action": "flash", "times": 6, "automation": "V
 
 
 def seed(store, now_ms):
-    events = [  # (id, minutes ago, type, description, alert kind, action, decision p)
+    events = [  # (id, minutes ago, type, description, alert kind, action, Decider's answer)
         ("p-doorbell", 0, "button_press", None, "doorbell",
          {"automation": "Visual doorbell", "device": "living-room-light", "command": {"action": "flash", "times": 3}}, None),
         ("p-unsure", 5, "motion_detected", "Something moved at the edge of the driveway.", "night",
-         {"automation": "Not sure", "device": "floodlight", "command": {"action": "pulse"}}, 0.61),
+         {"automation": "Not sure", "device": "floodlight", "command": {"action": "pulse", "duration_s": 10}}, ("person", 0.43)),
         ("p-package", 11, "motion_detected", "A cardboard package sits on the doorstep.", "activity",
-         {"automation": "Package porch light", "device": "porch-light", "command": {"action": "on", "duration_s": 600}}, 0.93),
-        ("p-cat", 22, "motion_detected", "A cat walks across the back yard.", "activity", None, 0.12),
+         {"automation": "Package porch light", "device": "porch-light", "command": {"action": "on", "duration_s": 600}},
+         ("package", 0.93)),
+        ("p-cat", 22, "motion_detected", "A cat walks across the back yard.", "activity", None, ("animal", 0.83)),
     ]
-    for eid, ago, kind, description, alert, act, p in events:
+    for eid, ago, kind, description, alert, act, decision in events:
         start = now_ms - ago * 60_000
         ev = {"id": eid, "device_id": "front" if eid != "p-cat" else "back", "start_ms": start, "end_ms": start,
               "event_type": kind, "sub_type": None, "source": "poll"}
@@ -36,15 +37,12 @@ def seed(store, now_ms):
         store.finish(eid, "done")
         if description:
             store.set_description(eid, description)
+        if decision:
+            store.set_decision(eid, *decision)
         store.add_alert(ev, alert, alert, True)
-        if act:
+        if act:  # the cat has none: a confident "animal" runs nothing, shown as a skipped false alarm
             store.add_actions(eid, [{**act, "topic": f"porchlink/{act['device']}/set", "ok": True, "error": None,
-                                     "decision_p": p}])
-        else:  # Decider said no: recorded as a skipped action, the house did nothing
-            store.add_actions(eid, [{"automation": "Package porch light", "device": "porch-light",
-                                     "topic": "porchlink/porch-light/set", "command": {"action": "on"}, "ok": True,
-                                     "error": None, "skipped": True, "decision_p": p}])
-
+                                     "decision_p": decision and decision[1]}])
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])

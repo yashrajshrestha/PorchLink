@@ -143,6 +143,40 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(s["headline"], "<img src=x onerror=alert(1)>")  # the page escapes it
 
 
+class DecisionChipTest(unittest.TestCase):
+    """Events with Decider's answer (event-level decision) get a 'Decider: <label> <p>' chip."""
+
+    def summarize(self, label, p, actions=(), min_p=0.5):
+        return web.summarize({"kinds": "night", "event_type": "motion_detected", "description": "Something at the door.",
+                              "decision": label, "decision_p": p}, list(actions), min_p)
+
+    def test_confident_answer_that_fired_is_ai(self):
+        s = self.summarize("package", 0.93, [action("Porch light ON for 10 min (Package porch light) (Decider p=0.93)", p=0.93)])
+        self.assertEqual(s["chip"], {"kind": "ai", "text": "Decider: package 0.93"})
+
+    def test_unsure_answer_with_its_pulse(self):
+        s = self.summarize("person", 0.43, [action("Living room light gentle pulse (Not sure) (Decider p=0.43)", p=0.43)])
+        self.assertEqual((s["chip"], s["detail"]), ({"kind": "unsure", "text": "Decider: person 0.43"},
+                                                    "Living room light gentle pulse (Not sure) (Decider p=0.43)"))
+
+    def test_confident_nothing_or_animal_is_a_skipped_false_alarm(self):
+        for label in ("nothing", "animal"):
+            s = self.summarize(label, 0.85)
+            self.assertEqual((s["chip"], s["detail"]),
+                             ({"kind": "skip", "text": f"Decider: {label} 0.85"}, "false alarm skipped"))
+
+    def test_confident_package_in_cooldown_is_still_ai(self):
+        s = self.summarize("package", 0.9)
+        self.assertEqual((s["chip"]["kind"], s["detail"]), ("ai", "nothing done"))
+
+    def test_cutoff_follows_min_p(self):
+        self.assertEqual(self.summarize("package", 0.7, min_p=0.8)["chip"]["kind"], "unsure")
+        self.assertEqual(self.summarize("nothing", 0.5)["chip"]["kind"], "skip")  # 0.5 is sure at min_p 0.5
+
+    def test_event_decision_wins_over_old_action_p(self):
+        self.assertEqual(self.summarize("package", 0.93, [action("x", p=0.2)])["chip"]["text"], "Decider: package 0.93")
+
+
 class StatusTest(unittest.TestCase):
     def test_status_states(self):
         health = {}
@@ -161,7 +195,7 @@ class StatusTest(unittest.TestCase):
 class ApiTest(unittest.TestCase):
     def start(self, **kw):
         self.store = Store(":memory:")
-        server = web.make_server(self.store, TZ, 0, None, kw.get("devices"), "", False, kw.get("status"))
+        server = web.make_server(self.store, TZ, 0, None, kw.get("devices"), "", False, kw.get("status"), kw.get("min_p", 0.5))
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -210,6 +244,20 @@ class ApiTest(unittest.TestCase):
                                        "decision_p": 0.12}])
         [e] = json.loads(self.get("/api/events")[2])
         self.assertEqual(e["summary"]["chip"], {"kind": "skip", "text": "Decider 0.12"})
+
+    def test_event_decision_round_trips_through_the_api(self):
+        self.start(min_p=0.9)
+        now = int(time.time() * 1000)
+        for eid, label, p in (("e3", "nothing", 0.95), ("e4", "package", 0.85)):
+            ev = {"id": eid, "device_id": "dev1", "start_ms": now, "end_ms": now, "event_type": "motion_detected",
+                  "sub_type": None, "source": "poll"}
+            self.store.begin(ev, "Back Yard")
+            self.store.finish(eid, "done")
+            self.store.add_alert(ev, "night", "Night.", True)
+            self.store.set_decision(eid, label, p)
+        chips = {e["id"]: (e["decision"], e["summary"]["chip"]) for e in json.loads(self.get("/api/events")[2])}
+        self.assertEqual(chips["e3"], ("nothing", {"kind": "skip", "text": "Decider: nothing 0.95"}))
+        self.assertEqual(chips["e4"], ("package", {"kind": "unsure", "text": "Decider: package 0.85"}))  # below min_p 0.9
 
     def test_devices_report_pulsing(self):
         devices = VirtualDevices(CONFIG)
