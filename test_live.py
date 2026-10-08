@@ -1,8 +1,12 @@
 """Tests for Watch live (no network, no browser). Run: python3 -m unittest test_live -v"""
-import io, unittest, urllib.error
+import io, json, threading, unittest, urllib.error, urllib.request
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 from live import LiveError, LiveViews
+import app
+import web
+from store import Store
 
 CAMERAS = [{"id": "ava1.ring.device.front", "name": "Front Door"}]
 FRONT = "ava1.ring.device.front"
@@ -191,6 +195,116 @@ class LiveViewsTest(unittest.TestCase):
         LiveViews("t", "https://api.example.com", lambda: cams, self.opener, self.timer).start("a/b?c", "v=0 offer")
         self.assertEqual(self.opener.requests[0][1],
                          "https://api.example.com/v1/devices/a%2Fb%3Fc/media/streaming/whep/sessions")
+
+
+class StubLive:
+    def __init__(self, error=None):
+        self.error, self.started, self.stopped = error, [], []
+
+    def cameras(self):
+        return CAMERAS
+
+    def start(self, device_id, offer):
+        self.started.append((device_id, offer))
+        if self.error:
+            raise self.error
+        return {"session": "s1", "answer": "v=0 answer", "expires_in": 180, "camera": "Front Door"}
+
+    def stop(self, session):
+        self.stopped.append(session)
+        return True
+
+
+class LiveApiTest(unittest.TestCase):
+    def start(self, live):
+        server = web.make_server(Store(":memory:"), ZoneInfo("UTC"), 0, live=live)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def call(self, method, path, body=None, ctype="application/sdp", length=None):
+        headers = {"Content-Type": ctype} if body is not None else {}
+        if length is not None:  # claim a size without sending it, like test_web's webhook 413 test
+            headers["Content-Length"] = str(length)
+        for _ in range(10):
+            req = urllib.request.Request(self.base + path, body, method=method, headers=headers)
+            try:
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        raw = r.read()
+                        return r.status, json.loads(raw) if raw else None
+                except urllib.error.HTTPError as e:
+                    raw = e.read()
+                    return e.code, json.loads(raw) if raw and e.headers.get("Content-Type") == "application/json" else None
+            except ConnectionResetError:
+                # An early refusal leaves the request body unread, so the server's close can reset the connection
+                # before the client has read the reply. Nothing was started, so asking again is safe.
+                continue
+        self.fail("connection kept resetting")
+
+    def test_cameras_are_listed_when_live_view_is_on(self):
+        self.start(StubLive())
+        self.assertEqual(self.call("GET", "/api/live"), (200, {"available": True, "cameras": CAMERAS}))
+
+    def test_live_view_off(self):
+        self.start(None)
+        self.assertEqual(self.call("GET", "/api/live"), (200, {"available": False, "cameras": []}))
+        self.assertEqual(self.call("POST", "/api/live/" + FRONT, b"v=0 offer"), (503, {"error": "Live view needs a Ring token"}))
+        self.assertEqual(self.call("DELETE", "/api/live/session/s1")[0], 204)
+
+    def test_offer_goes_through_and_the_answer_comes_back(self):
+        live = StubLive()
+        self.start(live)
+        self.assertEqual(self.call("POST", "/api/live/" + FRONT, b"v=0 offer"),
+                         (201, {"session": "s1", "answer": "v=0 answer", "expires_in": 180, "camera": "Front Door"}))
+        self.assertEqual(live.started, [(FRONT, "v=0 offer")])
+
+    def test_only_sdp_of_a_sane_size_is_accepted(self):
+        live = StubLive()
+        self.start(live)
+        self.assertEqual(self.call("POST", "/api/live/" + FRONT, b"v=0 offer", "text/plain"),
+                         (415, {"error": "expected application/sdp"}))
+        self.assertEqual(self.call("POST", "/api/live/" + FRONT, b"v", length=65_537), (413, {"error": "video offer too large"}))
+        self.assertEqual(live.started, [])
+
+    def test_live_errors_pass_through(self):
+        self.start(StubLive(LiveError(502, "Ring token expired: get a new Playground token and restart PorchLink")))
+        self.assertEqual(self.call("POST", "/api/live/" + FRONT, b"v=0 offer"),
+                         (502, {"error": "Ring token expired: get a new Playground token and restart PorchLink"}))
+
+    def test_stop_by_delete_or_beacon(self):
+        live = StubLive()
+        self.start(live)
+        self.assertEqual(self.call("DELETE", "/api/live/session/s1")[0], 204)
+        self.assertEqual(self.call("POST", "/api/live/session/s2/stop", b"", "text/plain")[0], 204)
+        self.assertEqual(live.stopped, ["s1", "s2"])
+
+    def test_unknown_live_paths(self):
+        self.start(StubLive())
+        self.assertEqual(self.call("POST", "/api/live/a/b", b"v=0 offer")[0], 404)
+        self.assertEqual(self.call("DELETE", "/api/live/other")[0], 404)
+        self.assertEqual(self.call("POST", "/webhook", b"{}", "application/json")[0], 404)  # webhooks still off without enqueue
+
+
+class DeviceNamesTest(unittest.TestCase):
+    def test_all_lists_cameras_and_never_raises(self):
+        class Ring:
+            def __init__(self, fail):
+                self.fail = fail
+
+            def devices(self):
+                if self.fail:
+                    raise ConnectionError("down")
+                return [{"id": "d1", "attributes": {"name": "Front Door"}}]
+
+        self.assertEqual(app.DeviceNames(Ring(False)).all(), {"d1": "Front Door"})
+        with mock.patch("builtins.print"):
+            self.assertEqual(app.DeviceNames(Ring(True)).all(), {})
+
+    def test_page_is_still_served_from_the_file(self):
+        with open(web.os.path.join(web.os.path.dirname(web.os.path.abspath(web.__file__)), "dashboard.html"), encoding="utf-8") as f:
+            self.assertEqual(web.PAGE, f.read())
 
 
 if __name__ == "__main__":

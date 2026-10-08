@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from alerts import EmailAlerter
 from bridge import Bridge, IotCorePublisher, LocalPublisher, MqttPublisher, VirtualDevices, describe_action, load_config
 from decider import DEFAULT_MIN_P, SEEN_OPTIONS, SEEN_QUESTION, state_text
+from live import LiveViews
 from ring_client import FakeRing, RingClient, TokenExpired, device_name, parse_event
 from rules import Settings, evaluate, format_alert, is_night
 from store import Store
@@ -74,14 +75,23 @@ class DeviceNames:
     def __init__(self, ring):
         self.ring, self.names = ring, {}
 
+    def _refresh(self):
+        try:
+            self.names.update({d["id"]: device_name(d) for d in self.ring.devices()})
+        except Exception as e:
+            print(f"(device names unavailable: {type(e).__name__}: {e})")
+
     def __call__(self, ev):
         device_id = ev["device_id"]
         if device_id not in self.names:
-            try:
-                self.names.update({d["id"]: device_name(d) for d in self.ring.devices()})
-            except Exception as e:
-                print(f"(device names unavailable: {type(e).__name__}: {e})")
+            self._refresh()
         return self.names.get(device_id, f"Ring device ...{device_id[-6:]}")
+
+    def all(self):
+        """Every camera, id -> name (for Watch live)."""
+        if not self.names:
+            self._refresh()
+        return dict(self.names)
 
 
 def make_process(store, alerter, settings, tz, describe=None, bridge=None, decide=None):
@@ -189,18 +199,24 @@ def main():
     min_p = float(env.get("DECIDER_MIN_P", DEFAULT_MIN_P))
     bridge = Bridge(config, publisher, min_p=min_p)
 
+    names = DeviceNames(ring)
+    # Watch live: the browser's video offer goes to Ring through PorchLink (see live.py). Off in FAKE mode
+    # unless RING_WHEP_BASE points at the simulator's camera (sim/fake_whep.py).
+    whep_base = env.get("RING_WHEP_BASE") or ("" if fake else env.get("RING_BASE_URL", "https://api.amazonvision.com"))
+    live = LiveViews(env.get("RING_TOKEN") or "sim-token", whep_base,
+                     lambda: [{"id": i, "name": n} for i, n in names.all().items()]) if whep_base else None
     worker = EventWorker(store, make_process(store, alerter, settings, tz, describe, bridge, decide),
-                         name_for=DeviceNames(ring)).start()
+                         name_for=names).start()
     webhook_secret = env.get("RING_WEBHOOK_SECRET", "")
     health = {}
     status = make_status(health, settings, tz, poll_seconds, "FAKE mode" if fake else "Ring API")
     threading.Thread(target=web.serve, args=(store, tz, int(env.get("WEB_PORT", 8080)), worker.submit, devices,
-                                             webhook_secret, env.get("WEBHOOK_LOG") == "1", status, min_p), daemon=True).start()
+                                             webhook_secret, env.get("WEBHOOK_LOG") == "1", status, min_p, live), daemon=True).start()
     print(f"PorchLink | {'FAKE mode' if fake else 'Ring API'} | poll every {poll_seconds}s | "
           f"email {'ON -> ' + alerter.to if alerter.enabled else 'OFF (printing only)'} | "
           f"webhooks {'signed' if webhook_secret else 'OFF (set RING_WEBHOOK_SECRET)'} | "
           f"vision {vision_backend + ' ' + describe.model if describe else 'OFF'} | Decider {decide.url if decide else 'OFF'} | "
-          f"devices: {'virtual (local)' if devices else env.get('BRIDGE')}, {len(config['automations'])} automations")
+          f"devices: {'virtual (local)' if devices else env.get('BRIDGE')}, {len(config['automations'])} automations | live view {'ON' if live else 'OFF'}")
 
     # Each device's first successful poll only records its existing history, so a restart does not re-send old
     # alerts, even when one device fails on the first poll and is seeded later.
