@@ -27,12 +27,13 @@ Preview the dashboard without Ring or AWS (every light state + sample events): `
 ## Home actions (`bridge.py`, `automations.json`)
 
 - Each automation has `when` (all must hold: `kind` such as `night` / `doorbell` / `person` / `burst`,
-  `description_has` words from the Bedrock description, optional `source` camera name) and `do`
-  (device commands). `cooldown_s` is measured in event time.
+  `description_has` words from the Bedrock description, optional `source` camera name, `time` `day` or `night`,
+  `seen` Decider answers such as `["package"]`, or `"unsure": true`) and `do` (device commands).
+  `cooldown_s` is measured in event time.
 - An automation can have an optional `label`, the word shown on its dashboard tile (for example "Doorbell!").
 - The `pulse` action is a gentle glow, used when the AI isn't sure; it lasts `duration_s` (default 10).
 - Commands are JSON on MQTT topics `porchlink/<device_id>/set`, for example
-  `{"action": "on", "duration_s": 300, "automation": "Night path light", ...}`.
+  `{"action": "on", "duration_s": 600, "automation": "Package porch light", "label": "Package", ...}`.
 - `BRIDGE=local` (default): virtual lights in this process, shown on the dashboard. No AWS needed.
 - `BRIDGE=iot`: publish to **AWS IoT Core** with the `iot-data` API (IAM credentials, `IOT_REGION`).
   Not yet run against a real account.
@@ -125,16 +126,18 @@ rm -f porchlink.db && RING_WEBHOOK_SECRET=sim-secret RING_BASE_URL=http://127.0.
 
 ## Strands Decider check (optional)
 
-Keyword matching fires the porch light for "No package, just a cardboard sign". With `DECIDER_ENABLED=1`, automations
-that have an `ask` question in `automations.json` ask a local [Strands Decider 2B](https://github.com/strands-labs/strands-decider)
-server instead, and fire only when P(yes) >= `DECIDER_MIN_P` (default 0.8, or `min_p` per automation). A skip shows in
-the email and timeline as "Porch light left alone (Package porch light): Decider unsure, p=0.77" (0.5 <= p < min_p)
-or "...: Decider said no, p=0.10" (only when the keywords would have fired). Skips do not use up the cooldown. If the
-server is down, PorchLink falls back to the keywords. The app sends one warm-up request at startup.
+With `DECIDER_ENABLED=1`, PorchLink asks a local [Strands Decider 2B](https://github.com/strands-labs/strands-decider)
+server one question per described motion event: "What is at the door in this camera frame?", with the options
+package / person / vehicle / animal / nothing. The answer and the time of day pick the light pattern in `automations.json`:
+package → porch light on, person at night → three lights flash, person by day → gentle pulse, vehicle at night →
+floodlight, animal or nothing → nothing ("false alarm skipped" on the dashboard). When the top answer's p is below
+`DECIDER_MIN_P` (default 0.5) the house gives a gentle "Not sure" pulse instead. Doorbell presses never ask Decider.
+If the server is down, rules fall back to their keywords. The app sends one warm-up request at startup.
+Scores on 42 labelled descriptions: [docs/decider-eval.md](docs/decider-eval.md) (`python3 eval_decider.py`).
 
 ```bash
 .venv/bin/pip install strands-decider    # separate install: pulls torch (about 5 GB)
-.venv/bin/strands-decider serve StrandsAgents/strands-decider-2B-hobson-v21 --device cpu --port 8000
+.venv/bin/strands-decider serve StrandsAgents/strands-decider-2B-hobson-v21 --device mps --port 8000    # Apple Silicon; use --device cpu elsewhere
 DECIDER_ENABLED=1 BEDROCK_ENABLED=1 AWS_PROFILE=<your own account> .venv/bin/python app.py
 ```
 
