@@ -62,7 +62,14 @@ Out of scope:
 | Night vehicle floodlight | seen vehicle, time night (fallback: kind night + description_has car/vehicle/truck/van) | floodlight on 3 min | Car arriving |
 | Not sure | unsure | living-room pulse 10 s | Not sure |
 
-The old "Night path light" (any night motion → hallway on) is **removed**: under Decider it would fire for cats. Its intent is covered by "Visitor at night". The per-automation yes/no `ask` questions are **replaced** by the single `seen` question, and `bridge.py`'s `ask` handling is removed.
+The old "Night path light" (any night motion → hallway on) is **replaced** by "Night light (AI off)" (`"no_decision": true`: night motion with no Decider answer → hallway on 5 min, label "Night motion"), so the house is never silent when the AI is down, and a cat never lights the hallway when Decider is on. "Visitor at night" and "Visitor by day" have a 60 s cooldown. The per-automation yes/no `ask` questions are **replaced** by the single `seen` question, and `bridge.py`'s `ask` handling is removed.
+
+### Changes after the final review (2026-10-08)
+
+- `description_has` matches whole words (plural -s/-es allowed) and ignores anything after a negation (no/not/nobody/none/without/never/n't) in the same sentence. Example: "no person is visible" does not mention a person, and "cardboard" is not "car".
+- Decider is asked only for `motion_detected` events. Live views and doorbell presses never ask it.
+- `DECIDER_TIMEOUT` defaults to 30 s, because calls run in the single worker thread.
+- The eval headline also reports "right and sure" (p ≥ min_p).
 
 ## Components
 
