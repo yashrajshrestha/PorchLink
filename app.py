@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from alerts import EmailAlerter
 from bridge import Bridge, IotCorePublisher, LocalPublisher, MqttPublisher, VirtualDevices, describe_action, load_config
+from decider import DEFAULT_MIN_P
 from ring_client import FakeRing, RingClient, TokenExpired, device_name, parse_event
 from rules import Settings, evaluate, format_alert, is_night
 from store import Store
@@ -175,7 +176,7 @@ def main():
         # The first call after a server start is slow (86 s measured on CPU); take it now, not on a real event.
         threading.Thread(target=decide, args=("Warm-up.", {"warm_up": {"question": "Is this a warm-up?"}}),
                          daemon=True).start()
-    bridge = Bridge(config, publisher, decide=decide, min_p=float(env.get("DECIDER_MIN_P", 0.8)))
+    bridge = Bridge(config, publisher, min_p=float(env.get("DECIDER_MIN_P", DEFAULT_MIN_P)))
 
     worker = EventWorker(store, make_process(store, alerter, settings, tz, describe, bridge),
                          name_for=DeviceNames(ring)).start()

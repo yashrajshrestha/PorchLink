@@ -33,6 +33,26 @@ class MatchTest(unittest.TestCase):
         self.assertTrue(matches(both, {"night"}, "A silver car is parked.", "x"))
         self.assertFalse(matches({"source": ["Back Yard"]}, set(), None, "Front Door"))
 
+    def test_decider_conditions(self):
+        pkg = {"label": "package", "p": 0.7}
+        self.assertTrue(matches({"seen": ["package"]}, set(), None, "x", pkg, 0.5))
+        self.assertFalse(matches({"seen": ["package"]}, set(), None, "x", pkg, 0.8))  # below min_p
+        self.assertFalse(matches({"seen": ["person"]}, set(), None, "x", pkg, 0.5))
+        self.assertTrue(matches({"seen": ["package"], "description_has": ["car"]}, set(), "A box.", "x", pkg, 0.5))  # keywords ignored
+        self.assertFalse(matches({"seen": ["package"]}, {"doorbell"}, "A box.", "x", pkg, 0.5))  # never for a doorbell press
+        self.assertTrue(matches({"time": "night"}, {"night"}, None, "x"))
+        self.assertFalse(matches({"time": "night"}, {"activity"}, None, "x"))
+        self.assertTrue(matches({"time": "day"}, {"activity"}, None, "x"))
+        self.assertTrue(matches({"unsure": True}, set(), "A shape.", "x", {"label": "person", "p": 0.4}, 0.5))
+        self.assertFalse(matches({"unsure": True}, set(), "A box.", "x", pkg, 0.5))
+        self.assertFalse(matches({"unsure": True}, set(), "A shape.", "x", None, 0.5))  # no answer is not "unsure"
+        self.assertFalse(matches({"unsure": True}, {"doorbell"}, "A shape.", "x", {"label": "person", "p": 0.4}, 0.5))
+
+    def test_without_a_decision_seen_falls_back_to_keywords(self):
+        self.assertTrue(matches({"seen": ["package"], "description_has": ["box"]}, set(), "A box.", "x"))
+        self.assertFalse(matches({"seen": ["package"], "description_has": ["box"]}, set(), "A cat.", "x"))
+        self.assertFalse(matches({"seen": ["person"]}, set(), "A person.", "x"))  # no keywords to fall back on
+
     def test_config_rejects_unknown_device(self):
         bad = os.path.join(HERE, "sim", "_bad_automations.json")
         with open(bad, "w") as f:
@@ -53,13 +73,13 @@ class BridgeTest(unittest.TestCase):
     def state(self, device_id):
         return next(d for d in self.devices.snapshot() if d["id"] == device_id)
 
-    def test_night_turns_hallway_on_then_it_times_out(self):
-        results = self.bridge.run(self.ev, {"night"}, None, "Front Door")
-        self.assertEqual([r["device"] for r in results], ["hallway-light"])
-        self.assertEqual(self.pub.sent[0][0], "porchlink/hallway-light/set")
-        self.assertTrue(self.state("hallway-light")["on"])
-        self.clock.t += 301
-        self.assertFalse(self.state("hallway-light")["on"])
+    def test_package_light_turns_on_then_times_out(self):
+        results = self.bridge.run(self.ev, {"activity"}, "A box is on the doorstep.", "Front Door")
+        self.assertEqual([r["device"] for r in results], ["porch-light"])
+        self.assertEqual(self.pub.sent[0][0], "porchlink/porch-light/set")
+        self.assertTrue(self.state("porch-light")["on"])
+        self.clock.t += 601
+        self.assertFalse(self.state("porch-light")["on"])
 
     def test_doorbell_flashes_living_room(self):
         self.bridge.run(self.ev, {"doorbell"}, None, "Front Door")
@@ -82,82 +102,106 @@ class BridgeTest(unittest.TestCase):
             ev = {"id": f"e{minutes}", "start_ms": 1_000_000_000 + minutes * 60_000}
             self.assertEqual(len(self.bridge.run(ev, {"activity"}, "A box.", "Front Door")), 1)
 
-    def test_night_vehicle_fires_two_automations(self):
+    def test_night_vehicle_by_keywords(self):
         results = self.bridge.run(self.ev, {"night"}, "A silver car is parked in the driveway.", "Back Yard")
-        self.assertEqual(sorted(r["device"] for r in results), ["floodlight", "hallway-light"])
+        self.assertEqual([r["device"] for r in results], ["floodlight"])
+        self.assertEqual(self.bridge.run(self.ev, {"activity"}, "A silver car is parked.", "Back Yard"), [])  # day
+
+    def test_without_decider_visitor_uses_keywords_and_unsure_never_fires(self):
+        night = self.bridge.run(self.ev, {"night"}, "A man stands at the door.", "Front Door")
+        self.assertEqual(sorted(r["device"] for r in night), ["hallway-light", "living-room-light", "porch-light"])
+        self.assertEqual({r["automation"] for r in night}, {"Visitor at night"})
+        self.assertEqual(self.bridge.run(self.ev, {"activity"}, "A man stands at the door.", "Front Door"), [])
+        self.assertEqual(self.bridge.run(self.ev, {"night"}, "Something moved.", "Front Door"), [])
 
     def test_failed_publish_is_reported_not_raised(self):
         class Broken:
             def publish(self, topic, payload):
                 raise ConnectionError("broker down")
-        results = Bridge(CONFIG, Broken(), self.clock).run(self.ev, {"night"}, None, "Front Door")
+        results = Bridge(CONFIG, Broken(), self.clock).run(self.ev, {"doorbell"}, None, "Front Door")
         self.assertFalse(results[0]["ok"])
         self.assertIn("broker down", results[0]["error"])
         self.assertTrue(describe_action(results[0]).endswith("FAILED"))
 
     def test_payload_shape(self):
-        self.bridge.run(self.ev, {"night"}, None, "Front Door")
+        self.bridge.run(self.ev, {"doorbell"}, None, "Front Door")
         payload = self.pub.sent[0][1]
-        self.assertEqual({k: payload[k] for k in ("action", "duration_s", "automation", "event_id", "source")},
-                         {"action": "on", "duration_s": 300, "automation": "Night path light",
-                          "event_id": "e1", "source": "Front Door"})
+        self.assertEqual({k: payload[k] for k in ("action", "times", "automation", "event_id", "source", "label")},
+                         {"action": "flash", "times": 3, "automation": "Visual doorbell",
+                          "event_id": "e1", "source": "Front Door", "label": "Doorbell!"})
 
 
 class DeciderBridgeTest(unittest.TestCase):
-    """Decider replaces keyword matching for automations with an `ask` question; a fake decide() stands in."""
+    """With a Decider answer, `seen`, `time` and `unsure` pick the automations; keywords are ignored."""
 
     def setUp(self):
-        self.clock, self.calls, self.answer = Clock(), [], {}
+        self.clock = Clock()
         self.devices = VirtualDevices(CONFIG, self.clock)
         self.pub = LocalPublisher(self.devices)
+        self.bridge = Bridge(CONFIG, self.pub, self.clock, min_p=0.5)
 
-        def decide(state, questions):
-            self.calls.append((state, questions))
-            return None if self.answer is None else {n: self.answer.get(n, 0.0) for n in questions}
-        self.bridge = Bridge(CONFIG, self.pub, self.clock, decide=decide, min_p=0.8)
+    def run_at(self, minutes, kinds, decision, description="Something is at the door."):
+        ev = {"id": f"e{minutes}", "start_ms": 1_000_000_000 + minutes * 60_000}
+        return self.bridge.run(ev, kinds, description, "Front Door", decision)
 
-    def at(self, minutes):
-        return {"id": f"e{minutes}", "start_ms": 1_000_000_000 + minutes * 60_000}
+    def fired(self, results):
+        return sorted((r["automation"], r["device"]) for r in results)
 
-    def test_confident_yes_fires_even_without_keywords(self):
-        self.answer = {"Package porch light": 0.93}
-        results = self.bridge.run(self.at(0), {"activity"}, "Something brown is leaning on the door.", "Front Door")
-        self.assertEqual([(r["device"], r["skipped"], r["decision_p"]) for r in results], [("porch-light", False, 0.93)])
-        self.assertIn("Decider p=0.93", describe_action(results[0]))
-        self.assertEqual(len(self.calls), 1)  # one request per event
+    def test_package_fires_without_keywords(self):
+        results = self.run_at(0, {"activity"}, {"label": "package", "p": 0.84}, "Something brown leans on the door.")
+        self.assertEqual([(r["device"], r["decision_p"], r["skipped"]) for r in results], [("porch-light", 0.84, False)])
+        self.assertIn("Decider p=0.84", describe_action(results[0]))
 
-    def test_unsure_skips_without_publishing_or_using_the_cooldown(self):
-        self.answer = {"Package porch light": 0.62}
-        results = self.bridge.run(self.at(0), {"activity"}, "No package visible, just a cardboard box sign.", "Front Door")
-        self.assertEqual([(r["device"], r["skipped"]) for r in results], [("porch-light", True)])
-        self.assertEqual(self.pub.sent, [])
-        self.assertIn("left alone (Package porch light): Decider unsure, p=0.62", describe_action(results[0]))
-        self.answer = {"Package porch light": 0.95}
-        again = self.bridge.run(self.at(1), {"activity"}, "A box sits on the doorstep.", "Front Door")
-        self.assertEqual([r["skipped"] for r in again], [False])
+    def test_keywords_are_ignored_when_decider_answers(self):
+        self.assertEqual(self.run_at(0, {"activity"}, {"label": "nothing", "p": 0.57}, "A pizza box lies on the steps."), [])
 
-    def test_confident_no_is_shown_only_when_keywords_would_have_fired(self):
-        self.answer = {"Package porch light": 0.1}
-        sign = self.bridge.run(self.at(0), {"activity"}, "No package, just a cardboard box sign.", "Front Door")
-        self.assertIn("Decider said no, p=0.10", describe_action(sign[0]))
-        self.assertEqual(self.bridge.run(self.at(1), {"activity"}, "A cat on the step.", "Front Door"), [])
+    def test_person_at_night_flashes_three_lights_and_by_day_pulses(self):
+        night = self.run_at(0, {"night"}, {"label": "person", "p": 0.9})
+        self.assertEqual(self.fired(night), [("Visitor at night", "hallway-light"), ("Visitor at night", "living-room-light"),
+                                             ("Visitor at night", "porch-light")])
+        self.assertTrue(all(r["command"] == {"action": "flash", "times": 3} for r in night))
+        day = self.run_at(1, {"activity"}, {"label": "person", "p": 0.9})
+        self.assertEqual(self.fired(day), [("Visitor by day", "living-room-light")])
+        self.assertEqual(day[0]["command"], {"action": "pulse", "duration_s": 10})
 
-    def test_decider_failure_falls_back_to_keywords(self):
-        self.answer = None
-        results = self.bridge.run(self.at(0), {"activity"}, "A box is on the doorstep.", "Front Door")
-        self.assertEqual([(r["device"], r["decision_p"]) for r in results], [("porch-light", None)])
+    def test_vehicle_only_at_night(self):
+        self.assertEqual(self.fired(self.run_at(0, {"night"}, {"label": "vehicle", "p": 0.92})),
+                         [("Night vehicle floodlight", "floodlight")])
+        self.assertEqual(self.run_at(1, {"activity"}, {"label": "vehicle", "p": 0.92}), [])
 
-    def test_not_asked_without_description_or_when_kind_filter_fails(self):
-        self.bridge.run(self.at(0), {"activity"}, None, "Front Door")
-        self.bridge.run(self.at(1), {"activity"}, "A silver car.", "Front Door")  # vehicle rule needs night
-        self.assertEqual([sorted(q) for _, q in self.calls], [["Package porch light"]])
+    def test_unsure_pulses_whatever_the_label(self):
+        for minutes, label in enumerate(["person", "package", "nothing"]):
+            results = self.run_at(minutes, {"night"}, {"label": label, "p": 0.43})
+            self.assertEqual([(r["automation"], r["decision_p"]) for r in results], [("Not sure", 0.43)])
+        lamp = next(d for d in self.devices.snapshot() if d["id"] == "living-room-light")
+        self.assertTrue(lamp["pulsing"])
+        self.assertEqual(lamp["last"]["label"], "Not sure")
 
-    def test_skipped_action_round_trips_through_store(self):
-        self.answer = {"Package porch light": 0.6}
+    def test_cutoff_is_inclusive(self):
+        self.assertEqual(self.fired(self.run_at(0, {"activity"}, {"label": "package", "p": 0.5})),
+                         [("Package porch light", "porch-light")])
+        self.assertEqual(self.fired(self.run_at(20, {"activity"}, {"label": "package", "p": 0.49})),
+                         [("Not sure", "living-room-light")])
+
+    def test_confident_animal_or_nothing_does_nothing(self):
+        self.assertEqual(self.run_at(0, {"night"}, {"label": "animal", "p": 0.83}), [])
+        self.assertEqual(self.run_at(1, {"night"}, {"label": "nothing", "p": 0.6}), [])
+
+    def test_doorbell_ignores_the_decision(self):
+        results = self.run_at(0, {"doorbell", "night"}, {"label": "person", "p": 0.2})
+        self.assertEqual(self.fired(results), [("Visual doorbell", "living-room-light")])
+        self.assertIsNone(results[0]["decision_p"])
+
+    def test_cooldown_still_applies(self):
+        self.assertEqual(len(self.run_at(0, {"activity"}, {"label": "package", "p": 0.9})), 1)
+        self.assertEqual(self.run_at(5, {"activity"}, {"label": "package", "p": 0.9}), [])  # 600 s cooldown
+        self.assertEqual(len(self.run_at(11, {"activity"}, {"label": "package", "p": 0.9})), 1)
+
+    def test_decision_p_round_trips_through_store(self):
         store = Store(":memory:")
-        store.add_actions("e0", self.bridge.run(self.at(0), {"activity"}, "A doormat.", "Front Door"))
+        store.add_actions("e0", self.run_at(0, {"activity"}, {"label": "package", "p": 0.84}))
         saved = store.actions_for(["e0"])["e0"][0]
-        self.assertEqual((saved["skipped"], saved["decision_p"]), (True, 0.6))
+        self.assertEqual((saved["skipped"], saved["decision_p"]), (False, 0.84))
 
 
 class IotCoreTest(unittest.TestCase):
@@ -206,7 +250,7 @@ class MqttPublisherTest(unittest.TestCase):
 
 
 class EndToEndTest(SimTestCase):
-    """Fake Ring server plays night_visit.json; a stub 'Bedrock' describes each event from its scenario image."""
+    """Fake Ring server plays night_visit.json; a stub 'Bedrock' describes each event from its scenario image. No Decider: keyword fallback."""
 
     def test_scenario_drives_the_lights(self):
         ring = self.start()
@@ -231,10 +275,12 @@ class EndToEndTest(SimTestCase):
 
         fired = store.db.execute("SELECT automation, COUNT(*) FROM actions GROUP BY automation").fetchall()
         fired = dict(fired)
-        self.assertEqual(fired.get("Visual doorbell"), 1)          # 22:52 button_press
-        self.assertGreaterEqual(fired.get("Night path light", 0), 4)  # every event after 23:00
+        self.assertEqual(fired.get("Visual doorbell"), 1)           # 22:52 button_press
+        self.assertEqual(fired.get("Package porch light"), 2)       # 22:50 and 23:05 ("box"); 23:12 in cooldown
         self.assertEqual(fired.get("Night vehicle floodlight"), 1)  # 23:11 car, back yard
-        self.assertEqual(fired.get("Package porch light"), 2)       # 22:50 and 23:05; 22:52 and 23:12 in cooldown
+        self.assertEqual(fired.get("Visitor at night"), 3)          # 23:12 courier, back yard: three lights flash
+        self.assertNotIn("Visitor by day", fired)                   # needs Decider
+        self.assertNotIn("Not sure", fired)                         # needs Decider
         doorbell = next(b for s, b in bodies if s.startswith("PorchLink: Doorbell"))
         self.assertIn("Home actions:", doorbell)
         self.assertIn("Living room light flash x3 (Visual doorbell)", doorbell)
