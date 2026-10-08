@@ -1,0 +1,159 @@
+"""Tests for Watch live (no network, no browser). Run: python3 -m unittest test_live -v"""
+import io, unittest, urllib.error
+from unittest import mock
+
+from live import LiveError, LiveViews
+
+CAMERAS = [{"id": "ava1.ring.device.front", "name": "Front Door"}]
+FRONT = "ava1.ring.device.front"
+
+
+class Response(io.BytesIO):
+    def __init__(self, status, body=b"", headers=None):
+        super().__init__(body)
+        self.status, self.headers = status, headers or {}
+
+
+class Opener:
+    """Records every request. POSTs get `reply` (a Response, or an exception to raise); DELETEs get 204,
+    or raise `delete_error` when set."""
+
+    def __init__(self, reply, delete_error=None):
+        self.reply, self.delete_error, self.requests = reply, delete_error, []
+
+    def __call__(self, req, timeout):
+        self.requests.append((req.get_method(), req.full_url, dict(req.header_items()), req.data))
+        if req.get_method() == "DELETE":
+            if self.delete_error:
+                raise self.delete_error
+            return Response(204)
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return Response(self.reply.status, self.reply.getvalue(), self.reply.headers)  # fresh: the caller closes it
+
+
+class FakeTimer:
+    def __init__(self, interval, fn, args):
+        self.interval, self.fn, self.args = interval, fn, args
+        self.daemon = self.started = self.cancelled = False
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        self.fn(*self.args)
+
+
+class LiveViewsTest(unittest.TestCase):
+    def setUp(self):
+        self.timers = []
+        patcher = mock.patch("builtins.print")  # failures are logged; keep test output clean
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def timer(self, interval, fn, args):
+        t = FakeTimer(interval, fn, args)
+        self.timers.append(t)
+        return t
+
+    def views(self, reply, **kw):
+        self.opener = Opener(reply, kw.pop("delete_error", None))
+        return LiveViews("secret-token", "https://api.example.com/", lambda: CAMERAS, self.opener, self.timer, **kw)
+
+    def ok(self, location="/v1/whep/sessions/abc"):
+        return Response(201, b"v=0 answer", {"Location": location})
+
+    def deletes(self):
+        return [(url, headers["Authorization"]) for method, url, headers, _ in self.opener.requests if method == "DELETE"]
+
+    def test_start_forwards_the_offer_with_the_token(self):
+        out = self.views(self.ok()).start(FRONT, "v=0 offer")
+        self.assertEqual((out["answer"], out["expires_in"], out["camera"]), ("v=0 answer", 180, "Front Door"))
+        method, url, headers, body = self.opener.requests[0]
+        self.assertEqual((method, url, body), (
+            "POST", "https://api.example.com/v1/devices/ava1.ring.device.front/media/streaming/whep/sessions", b"v=0 offer"))
+        self.assertEqual((headers["Authorization"], headers["Content-type"]), ("Bearer secret-token", "application/sdp"))
+
+    def test_browser_never_sees_the_token_or_ring_session_url(self):
+        out = self.views(self.ok()).start(FRONT, "v=0 offer")
+        self.assertGreaterEqual(len(out["session"]), 16)
+        for secret in ("secret-token", "/v1/whep/sessions/abc", "abc"):
+            self.assertNotIn(secret, out["session"])
+        self.assertNotIn("secret-token", repr(out))
+
+    def test_stop_deletes_the_absolute_location_once(self):
+        live = self.views(self.ok())
+        sid = live.start(FRONT, "v=0 offer")["session"]
+        self.assertTrue(live.stop(sid))
+        self.assertFalse(live.stop(sid))
+        self.assertEqual(self.deletes(), [("https://api.example.com/v1/whep/sessions/abc", "Bearer secret-token")])
+        self.assertTrue(self.timers[0].cancelled)
+
+    def test_cap_timer_closes_the_session(self):
+        live = self.views(self.ok(), cap_s=60)
+        sid = live.start(FRONT, "v=0 offer")["session"]
+        self.assertEqual((self.timers[0].interval, self.timers[0].started, self.timers[0].daemon), (60, True, True))
+        self.timers[0].fire()
+        self.assertFalse(live.stop(sid))  # the cap already closed it
+        self.assertEqual(len(self.deletes()), 1)
+
+    def test_oldest_session_is_closed_at_the_limit(self):
+        live = self.views(self.ok(), max_sessions=2)
+        a, b, c = (live.start(FRONT, "v=0 offer")["session"] for _ in range(3))
+        self.assertFalse(live.stop(a))
+        self.assertTrue(live.stop(b))
+        self.assertTrue(live.stop(c))
+
+    def test_ring_errors_become_readable_messages(self):
+        expected = {401: "Ring token expired: get a new Playground token and restart PorchLink",
+                    403: "This camera can't stream here (it may use end-to-end encryption)",
+                    404: "This camera can't stream here (it may use end-to-end encryption)",
+                    500: "Ring live view failed (500)"}
+        for status, message in expected.items():
+            error = urllib.error.HTTPError("https://x", status, "no", {}, io.BytesIO(b"Bearer secret-token rejected"))
+            with self.assertRaises(LiveError) as cm:
+                self.views(error).start(FRONT, "v=0 offer")
+            self.assertEqual((cm.exception.status, cm.exception.message), (502, message))
+        with self.assertRaises(LiveError) as cm:
+            self.views(Response(200, b"v=0 answer")).start(FRONT, "v=0 offer")  # Ring answers 201, nothing else
+        self.assertEqual(cm.exception.message, "Ring live view failed (200)")
+        with self.assertRaises(LiveError) as cm:
+            self.views(ConnectionRefusedError("down")).start(FRONT, "v=0 offer")
+        self.assertEqual((cm.exception.status, cm.exception.message), (502, "Ring live view failed (no answer)"))
+        self.assertEqual(self.timers, [])  # no session, no timer
+
+    def test_bad_requests_never_reach_ring(self):
+        live = self.views(self.ok())
+        with self.assertRaises(LiveError) as cm:
+            live.start("ava1.ring.device.back", "v=0 offer")
+        self.assertEqual((cm.exception.status, cm.exception.message), (404, "No such camera"))
+        for offer in ("", "v" * 65_537):
+            with self.assertRaises(LiveError) as cm:
+                live.start(FRONT, offer)
+            self.assertEqual((cm.exception.status, cm.exception.message), (400, "Bad video offer"))
+        self.assertEqual(self.opener.requests, [])
+
+    def test_missing_location_still_plays_and_stop_makes_no_call(self):
+        live = self.views(Response(201, b"v=0 answer"))
+        sid = live.start(FRONT, "v=0 offer")["session"]
+        self.assertTrue(live.stop(sid))
+        self.assertEqual([r[0] for r in self.opener.requests], ["POST"])
+
+    def test_close_errors_are_logged_not_raised(self):
+        live = self.views(self.ok(), delete_error=ConnectionResetError("gone"))
+        sid = live.start(FRONT, "v=0 offer")["session"]
+        self.assertTrue(live.stop(sid))
+
+    def test_device_id_is_url_quoted(self):
+        cams = [{"id": "a/b?c", "name": "Odd"}]
+        self.opener = Opener(self.ok())
+        LiveViews("t", "https://api.example.com", lambda: cams, self.opener, self.timer).start("a/b?c", "v=0 offer")
+        self.assertEqual(self.opener.requests[0][1],
+                         "https://api.example.com/v1/devices/a%2Fb%3Fc/media/streaming/whep/sessions")
+
+
+if __name__ == "__main__":
+    unittest.main()
