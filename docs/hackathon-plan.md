@@ -75,6 +75,16 @@ Skip: Greengrass/edge (if the internet is down Ring's event never arrives either
 
 **Days 7–8 — AWS proof (must for the $5K).** Real Bedrock calls, real IoT Core (shadows + rule → SNS), Lambda/API GW receiver deployed. IAM least-privilege policy in the repo. Budget alert $5. Screenshots for the video.
 
+**Day 9 — Watch live (agreed 2026-10-08).** A **"Watch live"** button on the dashboard plays the front-door camera inside the page, using Ring's live video (WebRTC/WHEP). The browser creates the WebRTC offer, and PorchLink's server forwards it to Ring with the bearer token and returns Ring's answer, so the Ring token never reaches the browser. The session closes when the viewer closes it, or after a time cap.
+- **Why it matters for a deaf user:** they can't use two-way audio, so *seeing* the visitor is the answer to "who's there?".
+- **Constraints:**
+  - Ring's watermark is on every frame. That's fine; show it.
+  - The Playground token lasts 30 minutes.
+  - E2EE cameras can't stream.
+  - The simulator has no video, so testing needs a real Playground token, and the dashboard must handle "live view unavailable" gracefully.
+- **Starting points:** `grab_frame.py` (WHEP, one frame) and the AmazonAppDev/ring-api-helloworld browser player.
+- **Demo moment:** doorbell → light flashes → tap "Watch live" → see the visitor.
+
 **Days 9–11 — stretch.** (1) **TV mode**: a `/tv` page served by PorchLink's web server — huge text, the snapshot, full-screen flash per event, pushed live over the existing connection. Opened in Fire TV's Silk browser (or any TV browser / Chromecast) it turns the living-room TV into a second visual alert, which matters for deaf/HoH users. No app store needed; a thin Fire OS wrapper app with heads-up notifications only if time allows (Fire OS allows heads-up over playing video; Vega OS does not). Competitor note: AccessBell already does Ring→Fire TV captions, so TV mode is a feature in our Ring entry, not a separate Fire TV submission. (2) Strands agent on AgentCore for triage/wording, if the core is done. Otherwise spend these days on tests (target 100+) and dashboard polish (pattern legend, per-event timeline with snapshot + verdict).
 
 **Days 12–14 — ship.** Demo video (script in §6), architecture diagram, README rewrite around the pitch, product feedback (per tool: Ring Playground, webhooks, Event History, Bedrock Nova 2 Lite, IoT Core, Strands/AgentCore), friction log, "what changed during the window" section (one commit before 31 Aug would be a problem — ours is 6 Oct, but document it anyway).
