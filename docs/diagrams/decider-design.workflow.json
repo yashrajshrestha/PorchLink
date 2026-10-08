@@ -1,0 +1,256 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "PorchLink: Strands Decider picks what the house does",
+    "quality_profile": "showcase",
+    "output": ".archify/workflow-porchlink-decider-20261007-203919/porchlink-decider.html",
+    "viewBox": [
+      1230,
+      786
+    ]
+  },
+  "lanes": [
+    {
+      "id": "ring",
+      "label": "Ring (read-only camera)"
+    },
+    {
+      "id": "porch",
+      "label": "PorchLink worker"
+    },
+    {
+      "id": "safety",
+      "label": "Safety rules (code, not AI)",
+      "variant": "exception"
+    },
+    {
+      "id": "ai",
+      "label": "AWS AI: Bedrock + Decider"
+    },
+    {
+      "id": "home",
+      "label": "Home: AWS IoT Core"
+    }
+  ],
+  "phases": [
+    {
+      "id": "arrive",
+      "label": "Event arrives",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "see",
+      "label": "See + decide",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "act",
+      "label": "Act",
+      "fromCol": 5,
+      "toCol": 5
+    }
+  ],
+  "mainPath": [
+    "ring_event",
+    "worker",
+    "snapshot",
+    "nova",
+    "decider",
+    "lights"
+  ],
+  "nodes": [
+    {
+      "id": "ring_event",
+      "lane": "ring",
+      "col": 0,
+      "type": "external",
+      "label": "Ring event",
+      "sublabel": "doorbell press / motion",
+      "width": 160
+    },
+    {
+      "id": "worker",
+      "lane": "porch",
+      "col": 1,
+      "type": "backend",
+      "label": "Event worker",
+      "sublabel": "signed, deduped, once",
+      "width": 160
+    },
+    {
+      "id": "snapshot",
+      "lane": "porch",
+      "col": 2,
+      "type": "backend",
+      "label": "Snapshot",
+      "sublabel": "crop Ring watermark",
+      "width": 160
+    },
+    {
+      "id": "doorbell_rule",
+      "lane": "safety",
+      "col": 1,
+      "type": "security",
+      "label": "Doorbell rule",
+      "sublabel": "press always flashes x3",
+      "tag": "no AI needed",
+      "width": 160
+    },
+    {
+      "id": "unsure",
+      "lane": "safety",
+      "col": 4,
+      "type": "security",
+      "label": "Unsure",
+      "sublabel": "confidence below 0.8",
+      "tag": "gentle pulse + log",
+      "width": 160
+    },
+    {
+      "id": "nova",
+      "lane": "ai",
+      "col": 3,
+      "type": "cloud",
+      "label": "Nova 2 Lite",
+      "sublabel": "person? package? car?",
+      "tag": "structured JSON",
+      "width": 160
+    },
+    {
+      "id": "decider",
+      "lane": "ai",
+      "col": 4,
+      "type": "cloud",
+      "label": "Strands Decider",
+      "sublabel": "pick pattern + confidence",
+      "tag": "runs on AWS GPU",
+      "width": 160
+    },
+    {
+      "id": "nothing",
+      "lane": "home",
+      "col": 4,
+      "type": "external",
+      "label": "Do nothing",
+      "sublabel": "cat, pizza box, sign",
+      "width": 160
+    },
+    {
+      "id": "lights",
+      "lane": "home",
+      "col": 5,
+      "type": "messagebus",
+      "label": "Light pattern",
+      "sublabel": "IoT Core to the lamps",
+      "width": 160
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-arrive",
+      "from": "ring_event",
+      "to": "worker",
+      "label": "webhook / poll",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-motion",
+      "from": "worker",
+      "to": "snapshot",
+      "label": "motion"
+    },
+    {
+      "id": "e-photo",
+      "from": "snapshot",
+      "to": "nova",
+      "label": "photo"
+    },
+    {
+      "id": "e-describe",
+      "from": "nova",
+      "to": "decider",
+      "label": "what it saw"
+    },
+    {
+      "id": "e-confident",
+      "from": "decider",
+      "to": "lights",
+      "label": "sure: pattern",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-press",
+      "from": "worker",
+      "to": "doorbell_rule",
+      "label": "doorbell press",
+      "variant": "security",
+      "role": "branch",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-rule-flash",
+      "from": "doorbell_rule",
+      "to": "lights",
+      "label": "flash x3",
+      "variant": "security"
+    },
+    {
+      "id": "e-unsure",
+      "from": "decider",
+      "to": "unsure",
+      "label": "not sure",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "e-gentle",
+      "from": "unsure",
+      "to": "lights",
+      "label": "gentle pulse",
+      "variant": "dashed"
+    },
+    {
+      "id": "e-nothing",
+      "from": "decider",
+      "to": "nothing",
+      "label": "false alarm",
+      "variant": "dashed",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "amber",
+      "title": "Light patterns Decider chooses",
+      "items": [
+        "Package at the door: porch light pulses amber",
+        "Car in the driveway at night: floodlight on",
+        "Unknown person at night: every room flashes",
+        "Cat, pizza box, cardboard sign: nothing"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Safety first",
+      "items": [
+        "A doorbell press always flashes, even if the AI is down",
+        "Decider only decides; code keeps the hard rules",
+        "Low confidence never stays silent: gentle pulse, logged for review"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Where it runs",
+      "items": [
+        "Build + test on the laptop: free, 7 to 17 s per decision",
+        "Demo on an AWS GPU: under 1 s, about 0.50 USD per hour, off when idle",
+        "Accuracy measured on labelled doorbell photos"
+      ]
+    }
+  ]
+}
