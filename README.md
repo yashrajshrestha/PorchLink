@@ -92,8 +92,8 @@ python3 sim/fake_ring_server.py sim/scenarios/night_visit.json --speed 60 --chao
 ## Test
 
 ```bash
-python3 -m unittest test_porchlink test_sim test_vision test_bridge test_decider test_webhooks test_worker test_web test_dashboard test_eval_decider -v   # app, sim, chaos, Bedrock/Ollama/Decider/MQTT (stubbed), bridge
-.venv/bin/python -m unittest test_grab_frame -v     # v2 frame grab (needs requirements-v2.txt)
+python3 -m unittest test_porchlink test_sim test_vision test_bridge test_decider test_webhooks test_worker test_web test_dashboard test_eval_decider test_live -v   # app, sim, chaos, Bedrock/Ollama/Decider/MQTT (stubbed), bridge
+.venv/bin/python -m unittest test_grab_frame test_live_e2e   # video tests (needs requirements-v2.txt)
 ```
 
 ## Bedrock snapshot descriptions (optional)
@@ -154,6 +154,21 @@ thread, so a slow call delays later events. `DECIDER_TIMEOUT` defaults to 30 s.
 
 If your `.env` still has `DECIDER_MIN_P=0.8` from an older copy, change it to 0.5, or most events will pulse "Not sure".
 The questions and cutoff were tuned on hand-written descriptions, not on real Nova Lite output: re-check with Bedrock on.
+
+## Watch live
+
+The dashboard's **▶ Watch live** button (and **▶ Watch** on each door event) plays the Ring camera in the page,
+muted, for up to 3 minutes; **Keep watching** starts a new session. The browser makes the WebRTC offer and PorchLink
+forwards it to Ring's WHEP endpoint with the token, so the token and Ring's session URL never reach the browser.
+Video goes straight from Ring to the browser. Ring's watermark is on every frame; cameras with end-to-end encryption
+can't stream, and the page says so.
+
+Try it without a camera (fake WHEP camera streams the simulator's pictures, stamped "SIMULATED CAMERA"):
+
+    .venv/bin/python sim/fake_whep.py &                        # port 9100
+    python3 dashboard_preview.py --whep http://127.0.0.1:9100  # open http://127.0.0.1:8090
+
+With a real Ring Playground token, Watch live is on automatically (`RING_TOKEN` in `.env`). The token lasts 30 minutes.
 
 ## Next (v2)
 

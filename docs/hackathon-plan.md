@@ -75,7 +75,7 @@ Skip: Greengrass/edge (if the internet is down Ring's event never arrives either
 
 **Days 7–8 — AWS proof (must for the $5K).** Real Bedrock calls, real IoT Core (shadows + rule → SNS), Lambda/API GW receiver deployed. IAM least-privilege policy in the repo. Budget alert $5. Screenshots for the video.
 
-**Day 9 — Watch live (agreed 2026-10-08).** A **"Watch live"** button on the dashboard plays the front-door camera inside the page, using Ring's live video (WebRTC/WHEP). The browser creates the WebRTC offer, and PorchLink's server forwards it to Ring with the bearer token and returns Ring's answer, so the Ring token never reaches the browser. The session closes when the viewer closes it, or after a time cap.
+**Day 9 — Watch live (agreed 2026-10-08; built 2026-10-09 on feat/watch-live, real-camera check pending).** A **"Watch live"** button on the dashboard plays the front-door camera inside the page, using Ring's live video (WebRTC/WHEP). The browser creates the WebRTC offer, and PorchLink's server forwards it to Ring with the bearer token and returns Ring's answer, so the Ring token never reaches the browser. The session closes when the viewer closes it, or after a time cap.
 - **Why it matters for a deaf user:** they can't use two-way audio, so *seeing* the visitor is the answer to "who's there?".
 - **Constraints:**
   - Ring's watermark is on every frame. That's fine; show it.
