@@ -227,21 +227,14 @@ class LiveApiTest(unittest.TestCase):
         headers = {"Content-Type": ctype} if body is not None else {}
         if length is not None:  # claim a size without sending it, like test_web's webhook 413 test
             headers["Content-Length"] = str(length)
-        for _ in range(10):
-            req = urllib.request.Request(self.base + path, body, method=method, headers=headers)
-            try:
-                try:
-                    with urllib.request.urlopen(req, timeout=5) as r:
-                        raw = r.read()
-                        return r.status, json.loads(raw) if raw else None
-                except urllib.error.HTTPError as e:
-                    raw = e.read()
-                    return e.code, json.loads(raw) if raw and e.headers.get("Content-Type") == "application/json" else None
-            except ConnectionResetError:
-                # An early refusal leaves the request body unread, so the server's close can reset the connection
-                # before the client has read the reply. Nothing was started, so asking again is safe.
-                continue
-        self.fail("connection kept resetting")
+        req = urllib.request.Request(self.base + path, body, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                raw = r.read()
+                return r.status, json.loads(raw) if raw else None
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            return e.code, json.loads(raw) if raw and e.headers.get("Content-Type") == "application/json" else None
 
     def test_cameras_are_listed_when_live_view_is_on(self):
         self.start(StubLive())
@@ -265,7 +258,7 @@ class LiveApiTest(unittest.TestCase):
         self.start(live)
         self.assertEqual(self.call("POST", "/api/live/" + FRONT, b"v=0 offer", "text/plain"),
                          (415, {"error": "expected application/sdp"}))
-        self.assertEqual(self.call("POST", "/api/live/" + FRONT, b"v", length=65_537), (413, {"error": "video offer too large"}))
+        self.assertEqual(self.call("POST", "/api/live/" + FRONT, b"", length=65_537), (413, {"error": "video offer too large"}))
         self.assertEqual(live.started, [])
 
     def test_live_errors_pass_through(self):
@@ -284,7 +277,7 @@ class LiveApiTest(unittest.TestCase):
         self.start(StubLive())
         self.assertEqual(self.call("POST", "/api/live/a/b", b"v=0 offer")[0], 404)
         self.assertEqual(self.call("DELETE", "/api/live/other")[0], 404)
-        self.assertEqual(self.call("POST", "/webhook", b"{}", "application/json")[0], 404)  # webhooks still off without enqueue
+        self.assertEqual(self.call("POST", "/webhook", b"", "application/json")[0], 404)  # webhooks still off without enqueue; empty body, as that path does not drain
 
 
 class DeviceNamesTest(unittest.TestCase):

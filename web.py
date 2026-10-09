@@ -115,22 +115,36 @@ def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret
                 enqueue(ev, None)
             self._send(200, "text/plain", "ok")
 
+        def _drain(self, length):
+            """Read and drop an unread request body before refusing early: closing a socket that still holds
+            request bytes makes the OS reset the connection, and the browser then misses the JSON reply."""
+            if 0 <= length <= MAX_OFFER_BYTES:
+                self.rfile.read(length)
+            else:  # too big or unreadable to drain: answer, then hang up
+                self.close_connection = True
+
         def _live_post(self, parts):
+            length = self._length()
             if len(parts) == 3 and parts[0] == "session" and parts[2] == "stop":  # sendBeacon when the page closes
+                self._drain(length)
                 if live:
                     live.stop(parts[1])
                 return self._send(204, "text/plain", "")
             if len(parts) != 1 or not parts[0]:
+                self._drain(length)
                 return self._send(404, "text/plain", "not found")
             if not live:
+                self._drain(length)
                 return self._json(503, {"error": "Live view needs a Ring token"})
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             if ctype != "application/sdp":  # also blocks cross-site form posts: this type needs CORS, never granted
+                self._drain(length)
                 return self._json(415, {"error": "expected application/sdp"})
-            length = self._length()
             if length < 0:
+                self.close_connection = True
                 return self._json(400, {"error": "bad Content-Length"})
             if length > MAX_OFFER_BYTES:
+                self.close_connection = True
                 return self._json(413, {"error": "video offer too large"})
             try:
                 out = live.start(unquote(parts[0]), self.rfile.read(length).decode(errors="replace"))
