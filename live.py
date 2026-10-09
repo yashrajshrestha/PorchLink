@@ -4,8 +4,10 @@ The browser posts its SDP offer to PorchLink; PorchLink posts it to Ring with th
 answer under a random session id. Video then flows from Ring to the browser directly. Each session is closed on
 Ring's side when the viewer stops, or after cap_s seconds at most. Standard library only.
 """
-import secrets, threading, urllib.error, urllib.request
+import ipaddress, secrets, threading, urllib.error, urllib.request
 from urllib.parse import quote, urljoin, urlparse
+
+from ring_client import _NO_REDIRECT  # a 3xx is an error here: the token must never follow a redirect
 
 MAX_OFFER_BYTES = 65_536  # a browser's SDP offer is a few KB
 _CANT_STREAM = "This camera can't stream here (it may use end-to-end encryption)"
@@ -21,11 +23,34 @@ class LiveError(Exception):
         self.status, self.message = status, message
 
 
+def _start_thread(fn):
+    threading.Thread(target=fn, daemon=True).start()
+
+
+def _is_ring_host(base, location):
+    """May the token go to `location`? Same scheme and host as the WHEP URL, or (both https) a sibling under the
+    same registered domain, since Ring may answer with its own media host."""
+    b, loc = urlparse(base), urlparse(location)
+    if (b.scheme, b.netloc) == (loc.scheme, loc.netloc):
+        return True
+    host, other = b.hostname or "", loc.hostname or ""
+    if b.scheme != "https" or loc.scheme != "https" or not host or not other:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return False  # an IP has no domain to share
+    except ValueError:
+        pass
+    labels = host.split(".")
+    return len(labels) >= 2 and other.endswith("." + ".".join(labels[-2:]))
+
+
 class LiveViews:
-    def __init__(self, token, base_url, cameras, opener=urllib.request.urlopen, timer=threading.Timer,
-                 cap_s=180, max_sessions=3, timeout=15):
+    def __init__(self, token, base_url, cameras, opener=_NO_REDIRECT.open, timer=threading.Timer,
+                 cap_s=180, max_sessions=3, timeout=15, spawn=_start_thread):
         self.token, self.base, self.cameras = token, base_url.rstrip("/"), cameras  # cameras() -> [{"id", "name"}]
-        self.opener, self.timer = opener, timer
+        self.opener, self.timer, self.spawn = opener, timer, spawn  # spawn(fn) runs fn off the request path
+        self.host_logged = False
         self.cap_s, self.max_sessions, self.timeout = cap_s, max_sessions, timeout
         self.lock, self.sessions = threading.Lock(), {}  # session id -> {"location", "timer"}, oldest first
 
@@ -60,7 +85,10 @@ class LiveViews:
             print(f"(live view refused by Ring: {status}: {answer[:300]})")
             raise LiveError(502, _RING_ERRORS.get(status, f"Ring live view failed ({status})"))
         location = urljoin(url, location) if location else None
-        if location and urlparse(location)[:2] != urlparse(url)[:2]:  # the token goes only to Ring's own origin
+        if not self.host_logged:  # once: shows which host real Ring uses for sessions
+            self.host_logged = True
+            print(f"(live view session host: {urlparse(location or url).hostname})")
+        if location and not _is_ring_host(url, location):  # the token goes only to Ring's own hosts
             print("(live view: ignoring Location on another host)")
             location = None
         session = secrets.token_urlsafe(16)
@@ -71,9 +99,9 @@ class LiveViews:
             evicted = []
             while len(self.sessions) > self.max_sessions:  # over the limit: the oldest viewers go
                 evicted.append(self.sessions.pop(next(iter(self.sessions))))
-        for old in evicted:
-            self._close(old)
         timer.start()
+        for old in evicted:  # Ring's DELETE can be slow; the new viewer should not wait for it
+            self.spawn(lambda old=old: self._close(old))
         return {"session": session, "answer": answer, "expires_in": self.cap_s, "camera": names[device_id]}
 
     def stop(self, session):

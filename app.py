@@ -72,10 +72,12 @@ def handle_event(ev, name, store, alerter, settings, tz, describe=None, bridge=N
 class DeviceNames:
     """Device id -> name. Webhooks only carry the id; refresh from Ring on a miss, never raise."""
 
-    def __init__(self, ring):
-        self.ring, self.names = ring, {}
+    def __init__(self, ring, clock=time.monotonic, retry_s=30):
+        self.ring, self.names, self.clock, self.retry_s = ring, {}, clock, retry_s
+        self.tried = None  # when Ring was last asked for the list
 
     def _refresh(self):
+        self.tried = self.clock()
         try:
             self.names.update({d["id"]: device_name(d) for d in self.ring.devices()})
         except Exception as e:
@@ -89,8 +91,8 @@ class DeviceNames:
 
     def all(self):
         """Every camera, id -> name (for Watch live)."""
-        if not self.names:
-            self._refresh()
+        if not self.names and (self.tried is None or self.clock() - self.tried >= self.retry_s):
+            self._refresh()  # not on every call: a Ring outage must not make each page load wait for a timeout
         return dict(self.names)
 
 

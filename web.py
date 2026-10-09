@@ -84,7 +84,20 @@ def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret
     class Handler(BaseHTTPRequestHandler):
         timeout = REQUEST_TIMEOUT
 
+        def _bad_host(self):
+            """True (after answering 403) unless the Host header names this server on loopback. A page on another
+            domain that re-resolves to 127.0.0.1 (DNS rebinding) sends its own name here, and must not reach the API."""
+            port = self.server.server_address[1]
+            if (self.headers.get("Host") or "").lower() in (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"):
+                return False
+            if self.command == "POST":
+                self._drain(self._length())  # so the client gets the 403, not a reset
+            self._send(403, "text/plain", "bad host")
+            return True
+
         def do_POST(self):
+            if self.path != "/webhook" and self._bad_host():  # webhooks arrive through a public tunnel; the signature guards them
+                return
             if self.path.startswith("/api/live/"):
                 return self._live_post(self.path[len("/api/live/"):].split("/"))
             if self.path != "/webhook" or not enqueue:
@@ -153,6 +166,8 @@ def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret
             self._json(201, out)
 
         def do_DELETE(self):
+            if self._bad_host():
+                return
             prefix = "/api/live/session/"
             session = self.path[len(prefix):] if self.path.startswith(prefix) else ""
             if not session or "/" in session:
@@ -162,6 +177,8 @@ def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret
             self._send(204, "text/plain", "")
 
         def do_GET(self):
+            if self._bad_host():
+                return
             if self.path == "/api/status":
                 return self._send(200, "application/json", json.dumps(status() if status else {}))
             if self.path == "/api/live":

@@ -1,5 +1,5 @@
 """Tests for Watch live (no network, no browser). Run: python3 -m unittest test_live -v"""
-import io, json, threading, unittest, urllib.error, urllib.request
+import http.client, http.server, io, json, threading, time, unittest, urllib.error, urllib.request
 from unittest import mock
 from zoneinfo import ZoneInfo
 
@@ -68,7 +68,8 @@ class LiveViewsTest(unittest.TestCase):
 
     def views(self, reply, **kw):
         self.opener = Opener(reply, kw.pop("delete_error", None))
-        return LiveViews("secret-token", "https://api.example.com/", lambda: CAMERAS, self.opener, self.timer, **kw)
+        kw.setdefault("spawn", lambda fn: fn())  # evictions close inline so tests stay deterministic
+        return LiveViews("secret-token", kw.pop("base", "https://api.example.com/"), lambda: CAMERAS, self.opener, self.timer, **kw)
 
     def ok(self, location="/v1/whep/sessions/abc"):
         return Response(201, b"v=0 answer", {"Location": location})
@@ -166,6 +167,57 @@ class LiveViewsTest(unittest.TestCase):
         self.assertTrue(live.stop(sid))
         self.assertEqual([r[0] for r in self.opener.requests], ["POST"])  # the token never leaves Ring's host
 
+    def test_location_on_rings_own_domain_is_kept(self):
+        live = self.views(self.ok("https://media.example.com/x"))
+        sid = live.start(FRONT, "v=0 offer")["session"]
+        self.assertTrue(live.stop(sid))
+        self.assertEqual(self.deletes(), [("https://media.example.com/x", "Bearer secret-token")])
+
+    def test_location_on_another_domain_or_plain_http_is_still_dropped(self):
+        for location in ("https://evil.example/x", "https://media.example.com.evil.example/x", "https://notexample.com/x",
+                         "http://media.example.com/x"):
+            live = self.views(self.ok(location), base="https://api.example.com")
+            live.stop(live.start(FRONT, "v=0 offer")["session"])
+            self.assertEqual(self.deletes(), [], location)
+
+    def test_sibling_hosts_need_a_dns_name_and_https(self):
+        for base, location in (("https://127.0.0.1:9100", "https://0.0.0.1/x"), ("http://api.example.com", "http://media.example.com/x")):
+            live = self.views(self.ok(location), base=base)
+            live.stop(live.start(FRONT, "v=0 offer")["session"])
+            self.assertEqual(self.deletes(), [], (base, location))
+
+    def test_session_host_is_printed_once(self):
+        live = self.views([self.ok("https://media.example.com/a"), self.ok("/b")])
+        live.start(FRONT, "v=0 offer")
+        live.start(FRONT, "v=0 offer")
+        lines = [c.args[0] for c in print.call_args_list if str(c.args[0]).startswith("(live view session host")]
+        self.assertEqual(lines, ["(live view session host: media.example.com)"])
+
+    def test_evicted_sessions_close_off_the_request_path(self):
+        pending = []
+        live = self.views([self.ok("/s/a"), self.ok("/s/b")], max_sessions=1, spawn=pending.append)
+        live.start(FRONT, "v=0 offer")
+        live.start(FRONT, "v=0 offer")  # returns without having sent the DELETE
+        self.assertEqual(self.deletes(), [])
+        self.assertEqual(len(pending), 1)
+        pending[0]()
+        self.assertEqual(self.deletes(), [("https://api.example.com/s/a", "Bearer secret-token")])
+
+    def test_default_spawn_closes_on_a_daemon_thread(self):
+        deleted = threading.Event()
+
+        class Signalling(Opener):
+            def __call__(self, req, timeout):
+                if req.get_method() == "DELETE":
+                    deleted.set()
+                return super().__call__(req, timeout)
+
+        self.opener = Signalling(self.ok("/s/a"))
+        live = LiveViews("t", "https://api.example.com", lambda: CAMERAS, self.opener, self.timer, max_sessions=1)
+        live.start(FRONT, "v=0 offer")
+        live.start(FRONT, "v=0 offer")
+        self.assertTrue(deleted.wait(5))
+
     def test_unencodable_offers_are_bad_requests(self):
         live = self.views(self.ok())
         for offer in ("\ud800", None, b"v=0 offer", 5):
@@ -195,6 +247,53 @@ class LiveViewsTest(unittest.TestCase):
         LiveViews("t", "https://api.example.com", lambda: cams, self.opener, self.timer).start("a/b?c", "v=0 offer")
         self.assertEqual(self.opener.requests[0][1],
                          "https://api.example.com/v1/devices/a%2Fb%3Fc/media/streaming/whep/sessions")
+
+
+class RedirectTest(unittest.TestCase):
+    """The real default opener: Ring's answer may be a redirect, and the token must not follow it."""
+
+    def serve(self, handler):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def test_a_redirect_is_a_failure_and_the_token_is_never_sent_on(self):
+        stolen = []
+
+        class Thief(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                stolen.append(self.headers.get("Authorization"))
+                self.send_response(201)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = do_DELETE = do_POST
+
+            def log_message(self, *args):
+                pass
+
+        thief = self.serve(Thief)
+
+        class Redirector(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{thief}/steal")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        ring = self.serve(Redirector)
+        live = LiveViews("secret-token", f"http://127.0.0.1:{ring}", lambda: CAMERAS)
+        with mock.patch("builtins.print"), self.assertRaises(LiveError) as cm:
+            live.start(FRONT, "v=0 offer")
+        self.assertEqual((cm.exception.status, cm.exception.message), (502, "Ring live view failed (302)"))
+        time.sleep(0.2)
+        self.assertEqual(stolen, [])
 
 
 class StubLive:
@@ -280,6 +379,51 @@ class LiveApiTest(unittest.TestCase):
         self.assertEqual(self.call("POST", "/webhook", b"", "application/json")[0], 404)  # webhooks still off without enqueue; empty body, as that path does not drain
 
 
+class HostCheckTest(unittest.TestCase):
+    """DNS rebinding: a page on another domain that resolves to 127.0.0.1 must not reach the API."""
+
+    def start(self, live=None, **kw):
+        self.queued = []
+        server = web.make_server(Store(":memory:"), ZoneInfo("UTC"), 0, live=live, **kw)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.port = server.server_address[1]
+
+    def call(self, method, path, host, body=None, ctype="application/sdp"):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        headers = {"Host": host}
+        if body is not None:
+            headers["Content-Type"] = ctype
+        conn.request(method, path, body, headers)
+        r = conn.getresponse()
+        out = r.status, r.read().decode()
+        conn.close()
+        return out
+
+    def test_foreign_hosts_are_refused_on_every_method(self):
+        live = StubLive()
+        self.start(live)
+        self.assertEqual(self.call("GET", "/api/live", "evil.example"), (403, "bad host"))
+        self.assertEqual(self.call("GET", "/", "evil.example:8080"), (403, "bad host"))
+        self.assertEqual(self.call("POST", "/api/live/" + FRONT, "evil.example:8080", b"v=0 offer"), (403, "bad host"))
+        self.assertEqual(self.call("DELETE", "/api/live/session/s1", "evil.example"), (403, "bad host"))
+        self.assertEqual(self.call("GET", "/api/live", f"127.0.0.1.evil.example:{self.port}")[0], 403)
+        self.assertEqual(self.call("GET", "/api/live", "127.0.0.1:1")[0], 403)  # not this server's port
+        self.assertEqual((live.started, live.stopped), ([], []))
+
+    def test_local_names_are_accepted_in_any_case(self):
+        self.start(StubLive())
+        for host in (f"localhost:{self.port}", f"127.0.0.1:{self.port}", f"[::1]:{self.port}", f"LocalHost:{self.port}"):
+            self.assertEqual(self.call("GET", "/", host)[0], 200, host)
+
+    def test_webhooks_keep_working_through_a_public_tunnel(self):
+        self.start(enqueue=lambda ev, name: self.queued.append(ev), webhook_secret="k")
+        with mock.patch("builtins.print"):
+            status, body = self.call("POST", "/webhook", "abc123.tunnel.example", b"{}", "application/json")
+        self.assertEqual((status, body), (401, "bad signature"))  # reached the signature check, not the host check
+
+
 class DeviceNamesTest(unittest.TestCase):
     def test_all_lists_cameras_and_never_raises(self):
         class Ring:
@@ -294,6 +438,28 @@ class DeviceNamesTest(unittest.TestCase):
         self.assertEqual(app.DeviceNames(Ring(False)).all(), {"d1": "Front Door"})
         with mock.patch("builtins.print"):
             self.assertEqual(app.DeviceNames(Ring(True)).all(), {})
+
+    def test_a_failing_ring_is_asked_at_most_every_30_seconds(self):
+        class Down:
+            calls = 0
+
+            def devices(self):
+                self.calls += 1
+                raise ConnectionError("down")
+
+        now = [100.0]
+        ring = Down()
+        names = app.DeviceNames(ring, clock=lambda: now[0])
+        with mock.patch("builtins.print"):
+            names.all()
+            now[0] += 29
+            names.all()
+            self.assertEqual(ring.calls, 1)
+            now[0] += 2
+            names.all()
+            self.assertEqual(ring.calls, 2)
+            names({"device_id": "ava1.ring.device.X"})  # the worker's lookup still asks on a miss
+            self.assertEqual(ring.calls, 3)
 
     def test_page_is_still_served_from_the_file(self):
         with open(web.os.path.join(web.os.path.dirname(web.os.path.abspath(web.__file__)), "dashboard.html"), encoding="utf-8") as f:
