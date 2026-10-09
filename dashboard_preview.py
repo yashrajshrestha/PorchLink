@@ -2,6 +2,7 @@
 """Show the PorchLink dashboard with every light state and sample events, without Ring or AWS.
 
 Run: python3 dashboard_preview.py [--port 8090]   then open http://127.0.0.1:8090
+With a fake camera: .venv/bin/python sim/fake_whep.py & python3 dashboard_preview.py --whep http://127.0.0.1:9100
 Lights: hallway off, living room flashing (doorbell), porch amber (package), driveway gentle pulse (not sure).
 The states re-apply every few seconds so the preview stays lively for screenshots and the demo video.
 """
@@ -47,6 +48,7 @@ def seed(store, now_ms):
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--port", type=int, default=8090)
+    p.add_argument("--whep", help="fake camera URL (sim/fake_whep.py) to turn on Watch live")
     a = p.parse_args()
     devices, store = VirtualDevices(load_config("automations.json")), Store(":memory:")
     seed(store, int(time.time() * 1000))
@@ -60,7 +62,12 @@ def main():
     threading.Thread(target=keep_lively, daemon=True).start()
     status = lambda: {"mode": "Preview", "ring_ok": True, "night": True,
                       "time": time.strftime("%I:%M %p").lstrip("0"), "day": time.strftime("%a")}
-    web.serve(store, TZ, a.port, None, devices, "", False, status)
+    live = None
+    if a.whep:
+        from live import LiveViews
+        live = LiveViews("preview-token", a.whep, lambda: [{"id": "front", "name": "Front Door"},
+                                                          {"id": "back", "name": "Back Yard"}])
+    web.serve(store, TZ, a.port, None, devices, "", False, status, live=live)
 
 
 if __name__ == "__main__":
