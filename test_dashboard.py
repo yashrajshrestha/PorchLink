@@ -205,6 +205,14 @@ class ApiTest(unittest.TestCase):
         with urllib.request.urlopen(self.base + path, timeout=5) as r:
             return r.status, r.headers.get("Content-Type"), r.read().decode()
 
+    def test_page_has_watch_live(self):
+        self.start()
+        body = self.get("/")[2]
+        for marker in ('id="watch-live"', 'id="live"', 'id="live-video"', 'id="live-status"', 'id="live-stop"',
+                       'id="live-again"', "Keep watching", "muted", "playsinline", "RTCPeerConnection", "recvonly",
+                       "application/sdp", "/api/live/session/", "sendBeacon", "data-watch", "Live view needs a Ring token"):
+            self.assertIn(marker, body)
+
     def test_status_endpoint(self):
         self.start(status=lambda: {"mode": "Ring API", "ring_ok": True, "night": True, "time": "10:52 PM", "day": "Thu"})
         code, ctype, body = self.get("/api/status")

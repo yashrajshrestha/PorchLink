@@ -34,15 +34,33 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute
 .ev{display:flex;gap:14px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 14px;margin-bottom:9px}
 .icon{width:52px;height:52px;border-radius:12px;flex:none;display:grid;place-items:center;font-size:26px;background:#20252e}
 .ev b{font-size:16px}.meta{font-size:13px;color:var(--muted)}
-.chip{margin-left:auto;font-size:12px;font-weight:700;border-radius:999px;padding:4px 11px;white-space:nowrap}
+.chip{font-size:12px;font-weight:700;border-radius:999px;padding:4px 11px;white-space:nowrap}
 .chip.rule{background:#3a2a0b;color:#ffc24d}.chip.ai{background:#14233d;color:#8db4ff}
 .chip.skip{background:#1f242d;color:#9aa3b2}.chip.unsure{background:#33290f;color:#f3d58c}
 .grid .note{grid-column:1/-1}
 .empty,.note{color:var(--muted);background:var(--card);border:1px dashed var(--line);border-radius:16px;padding:18px;text-align:center}
-@media (max-width:560px){main{padding:18px 14px}.ev{flex-wrap:wrap}.chip{margin-left:66px}}
+button{font:inherit;cursor:pointer}
+.right{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.watch{background:var(--amber);color:#1b1404;border:0;border-radius:999px;padding:8px 16px;font-weight:800}
+.watch:disabled{background:#2a2f39;color:var(--muted);cursor:not-allowed}
+.watch.small{padding:4px 11px;font-size:12px}
+.acts{margin-left:auto;display:flex;gap:8px;align-items:center}
+.live{background:var(--card);border:1px solid #5a4416;border-radius:20px;padding:14px;margin-bottom:22px}
+.live[hidden]{display:none}
+.live-head,.live-foot{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.live-head b{font-size:17px}.live-foot{margin-top:10px;color:var(--muted);font-size:14px}
+.live video{display:block;width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;margin-top:10px;object-fit:contain}
+.stop{background:#2a2f39;color:var(--text);border:1px solid var(--line);border-radius:999px;padding:6px 14px;font-weight:700}
+@media (max-width:560px){main{padding:18px 14px}.ev{flex-wrap:wrap}.acts{margin-left:66px}}
 </style></head><body><main>
 <div class="top"><div class="brand">Porch<span>Link</span></div>
-<div class="status"><span class="dot" id="dot"></span><span id="status-text">Connecting…</span></div></div>
+<div class="right"><button class="watch" id="watch-live" disabled title="Live view needs a Ring token">▶ Watch live</button>
+<div class="status"><span class="dot" id="dot"></span><span id="status-text">Connecting…</span></div></div></div>
+<section class="live" id="live" hidden aria-label="Live camera">
+<div class="live-head"><b id="live-title">Live</b><button class="stop" id="live-stop">Stop</button></div>
+<video id="live-video" autoplay muted playsinline></video>
+<div class="live-foot"><span id="live-status" role="status">Connecting…</span><button class="watch" id="live-again" hidden>Keep watching</button></div>
+</section>
 <div class="grid" id="tiles"></div>
 <div class="legend" id="legend"><span><i style="background:#ffbf3a"></i>On (steady glow)</span>
 <span><i style="background:#ffbf3a;opacity:.5"></i>Flashing = doorbell or alert</span>
@@ -77,8 +95,10 @@ function renderTiles(ds){
 }
 function eventRow(e){
   const s=e.summary,meta=[e.device_name||"",clock(e.start_ms),s.detail].filter(Boolean).map(esc).join(" · ");
+  const watch=cameras[e.device_id]?'<button class="watch small" data-watch="'+esc(e.device_id)+'">▶ Watch</button>':"";
   return '<div class="ev" data-testid="event"><div class="icon" aria-hidden="true">'+(ICON[s.icon]||ICON.motion)+
-    '</div><div><b>'+esc(s.headline)+'</b><div class="meta">'+meta+'</div></div><span class="chip '+esc(s.chip.kind)+'">'+esc(s.chip.text)+'</span></div>';
+    '</div><div><b>'+esc(s.headline)+'</b><div class="meta">'+meta+'</div></div><div class="acts">'+watch+
+    '<span class="chip '+esc(s.chip.kind)+'">'+esc(s.chip.text)+'</span></div></div>';
 }
 function renderStatus(st){
   document.getElementById("dot").className="dot "+(st.ring_ok===false?"bad":st.ring_ok?"ok":"");
@@ -91,6 +111,7 @@ async function tick(){
     const [ds,evs,st]=await Promise.all(["/api/devices","/api/events","/api/status"].map(u=>fetch(u).then(r=>r.json())));
     renderTiles(ds);document.getElementById("legend").hidden=!ds.length;
     const key=JSON.stringify(evs);
+    newestCamera=evs.length?evs[0].device_id:null;
     if(key!==lastEvents){eventsEl.innerHTML=evs.length?evs.map(eventRow).join(""):'<div class="empty">No events yet.</div>';lastEvents=key;}
     renderStatus(st);
   }catch(err){
@@ -98,5 +119,70 @@ async function tick(){
     document.getElementById("status-text").textContent="Dashboard lost connection to PorchLink";
   }
 }
-tick();setInterval(tick,1000);
+// Watch live: the browser makes the WebRTC offer; PorchLink forwards it to Ring with the token (see live.py).
+const $=id=>document.getElementById(id);
+let cameras={},newestCamera=null,pc=null,session=null,countdown=null,currentCam=null;
+async function loadLive(){
+  let r={available:false,cameras:[]};
+  try{r=await (await fetch("/api/live")).json();}catch(err){}
+  cameras={};for(const c of r.cameras)cameras[c.id]=c.name;
+  const b=$("watch-live");b.disabled=!r.available||!r.cameras.length;
+  b.title=b.disabled?"Live view needs a Ring token":"";
+  lastEvents="";  // re-render rows so their ▶ Watch buttons match the camera list
+}
+const say=text=>{$("live-status").textContent=text;};
+const closeOnRing=s=>fetch("/api/live/session/"+encodeURIComponent(s),{method:"DELETE"}).catch(()=>{});
+function stopLive(reason){
+  clearInterval(countdown);countdown=null;
+  if(pc){pc.close();pc=null;}
+  $("live-video").srcObject=null;
+  if(session){closeOnRing(session);session=null;}
+  if(reason)say(reason);
+}
+function startCountdown(secs){
+  const end=Date.now()+secs*1000;
+  const show=()=>{
+    const left=Math.max(0,Math.round((end-Date.now())/1000));
+    if(!left){stopLive("Stopped after "+Math.round(secs/60)+" minutes");$("live-again").hidden=false;return;}
+    say("Live · "+Math.floor(left/60)+":"+String(left%60).padStart(2,"0")+" left");
+  };
+  show();countdown=setInterval(show,1000);
+}
+function watchForVideo(mine){
+  const v=$("live-video"),t=setTimeout(()=>{if(pc===mine&&!v.videoWidth)stopLive("Couldn't connect to the camera");},15000);
+  v.addEventListener("playing",()=>clearTimeout(t),{once:true});
+  mine.addEventListener("connectionstatechange",()=>{if(pc===mine&&mine.connectionState==="failed")stopLive("Couldn't connect to the camera");});
+}
+async function watch(cam){
+  if(!cam)return;
+  stopLive();
+  currentCam=cam;$("live").hidden=false;$("live-again").hidden=true;
+  $("live-title").textContent=(cameras[cam]||"Camera")+" · LIVE";say("Connecting…");
+  const mine=pc=new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+  try{
+    mine.addTransceiver("video",{direction:"recvonly"});mine.addTransceiver("audio",{direction:"recvonly"});
+    mine.ontrack=e=>{if(e.track.kind==="video")$("live-video").srcObject=e.streams[0]||new MediaStream([e.track]);};
+    await mine.setLocalDescription(await mine.createOffer());
+    await new Promise(done=>{  // Ring wants every ICE candidate in the offer
+      if(mine.iceGatheringState==="complete")return done();
+      const t=setTimeout(done,3000);
+      mine.addEventListener("icegatheringstatechange",()=>{if(mine.iceGatheringState==="complete"){clearTimeout(t);done();}});
+    });
+    if(pc!==mine)return;  // stopped while gathering
+    const r=await fetch("/api/live/"+encodeURIComponent(cam),{method:"POST",headers:{"Content-Type":"application/sdp"},body:mine.localDescription.sdp});
+    const out=await r.json();
+    if(!r.ok)throw new Error(out.error||"Live view failed");
+    if(pc!==mine){closeOnRing(out.session);return;}
+    session=out.session;
+    await mine.setRemoteDescription({type:"answer",sdp:out.answer});
+    startCountdown(out.expires_in);watchForVideo(mine);
+  }catch(err){if(pc===mine)stopLive(err.message||"Couldn't connect to the camera");}
+}
+$("watch-live").onclick=()=>watch(cameras[newestCamera]?newestCamera:Object.keys(cameras)[0]);
+$("live-stop").onclick=()=>{stopLive();$("live").hidden=true;};
+$("live-again").onclick=()=>watch(currentCam);
+eventsEl.addEventListener("click",e=>{const b=e.target.closest("[data-watch]");if(b)watch(b.dataset.watch);});
+addEventListener("keydown",e=>{if(e.key==="Escape"&&!$("live").hidden){stopLive();$("live").hidden=true;}});
+addEventListener("pagehide",()=>{if(session)navigator.sendBeacon("/api/live/session/"+encodeURIComponent(session)+"/stop");});
+loadLive().then(()=>{tick();setInterval(tick,1000);setInterval(loadLive,30000);});
 </script></body></html>
