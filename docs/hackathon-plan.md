@@ -81,7 +81,7 @@ Skip: Greengrass/edge (if the internet is down Ring's event never arrives either
   - Ring's watermark is on every frame. That's fine; show it.
   - The Playground token lasts 30 minutes.
   - E2EE cameras can't stream.
-  - The simulator has no video, so testing needs a real Playground token, and the dashboard must handle "live view unavailable" gracefully.
+  - `sim/fake_whep.py` streams test video for local checks, but the real camera still needs a Playground token, and the dashboard must handle "live view unavailable" gracefully.
 - **Starting points:** `grab_frame.py` (WHEP, one frame) and the AmazonAppDev/ring-api-helloworld browser player.
 - **Demo moment:** doorbell → light flashes → tap "Watch live" → see the visitor.
 

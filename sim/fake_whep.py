@@ -12,11 +12,18 @@ import argparse, asyncio, glob, os, secrets, time
 import av
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGES = sorted(glob.glob(os.path.join(HERE, "images", "*.jpg")))
 SESSIONS = web.AppKey("sessions", dict)  # the open sessions: fake[SESSIONS]
+_PICTURES = []  # the porch pictures cropped to the video's shape, built on first use and shared by every session
+
+
+def pictures():
+    if not _PICTURES:
+        _PICTURES.extend(ImageOps.fit(Image.open(p).convert("RGB"), (640, 360)) for p in IMAGES)  # crop, never squash
+    return _PICTURES
 
 
 class PorchTrack(VideoStreamTrack):
@@ -25,7 +32,7 @@ class PorchTrack(VideoStreamTrack):
     def __init__(self, device_id, hold_s=3):
         super().__init__()
         self.device_id, self.hold_s, self.started = device_id, hold_s, time.time()
-        self.pictures = [Image.open(p).convert("RGB").resize((640, 360)) for p in IMAGES]
+        self.pictures = pictures()
 
     async def recv(self):
         pts, time_base = await self.next_timestamp()

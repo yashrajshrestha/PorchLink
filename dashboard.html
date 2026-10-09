@@ -59,7 +59,7 @@ button{font:inherit;cursor:pointer}
 <section class="live" id="live" hidden aria-label="Live camera">
 <div class="live-head"><b id="live-title">Live</b><button class="stop" id="live-stop">Stop</button></div>
 <video id="live-video" autoplay muted playsinline></video>
-<div class="live-foot"><span id="live-status" role="status">Connecting…</span><button class="watch" id="live-again" hidden>Keep watching</button></div>
+<div class="live-foot"><span><span id="live-status" role="status">Connecting…</span><span id="live-time"></span></span><button class="watch" id="live-again" hidden>Keep watching</button></div>
 </section>
 <div class="grid" id="tiles"></div>
 <div class="legend" id="legend"><span><i style="background:#ffbf3a"></i>On (steady glow)</span>
@@ -95,7 +95,7 @@ function renderTiles(ds){
 }
 function eventRow(e){
   const s=e.summary,meta=[e.device_name||"",clock(e.start_ms),s.detail].filter(Boolean).map(esc).join(" · ");
-  const watch=cameras[e.device_id]?'<button class="watch small" data-watch="'+esc(e.device_id)+'">▶ Watch</button>':"";
+  const watch=cameras[e.device_id]?'<button class="watch small" data-watch="'+esc(e.device_id)+'" aria-label="Watch '+esc(cameras[e.device_id])+' live">▶ Watch</button>':"";
   return '<div class="ev" data-testid="event"><div class="icon" aria-hidden="true">'+(ICON[s.icon]||ICON.motion)+
     '</div><div><b>'+esc(s.headline)+'</b><div class="meta">'+meta+'</div></div><div class="acts">'+watch+
     '<span class="chip '+esc(s.chip.kind)+'">'+esc(s.chip.text)+'</span></div></div>';
@@ -121,19 +121,22 @@ async function tick(){
 }
 // Watch live: the browser makes the WebRTC offer; PorchLink forwards it to Ring with the token (see live.py).
 const $=id=>document.getElementById(id);
-let cameras={},newestCamera=null,pc=null,session=null,countdown=null,currentCam=null;
+let cameras=Object.create(null),newestCamera=null,pc=null,session=null,countdown=null,currentCam=null;
 async function loadLive(){
   let r={available:false,cameras:[]};
   try{r=await (await fetch("/api/live")).json();}catch(err){}
-  cameras={};for(const c of r.cameras)cameras[c.id]=c.name;
-  const b=$("watch-live");b.disabled=!r.available||!r.cameras.length;
+  const next=Object.create(null);for(const c of (r.cameras||[]))next[c.id]=c.name;
+  const changed=Object.keys(next).sort().join("\n")!==Object.keys(cameras).sort().join("\n");
+  cameras=next;
+  const b=$("watch-live");b.disabled=!r.available||!Object.keys(cameras).length;
   b.title=b.disabled?"Live view needs a Ring token":"";
-  lastEvents="";  // re-render rows so their ▶ Watch buttons match the camera list
+  if(changed)lastEvents="";  // re-render rows so their ▶ Watch buttons match the camera list; not on every refresh, it would steal focus
 }
-const say=text=>{$("live-status").textContent=text;};
+const say=text=>{$("live-status").textContent=text;$("live-time").textContent="";};  // the status is the live region: only state changes go here
 const closeOnRing=s=>fetch("/api/live/session/"+encodeURIComponent(s),{method:"DELETE"}).catch(()=>{});
 function stopLive(reason){
   clearInterval(countdown);countdown=null;
+  $("live-time").textContent="";
   if(pc){pc.close();pc=null;}
   $("live-video").srcObject=null;
   if(session){closeOnRing(session);session=null;}
@@ -144,9 +147,9 @@ function startCountdown(secs){
   const show=()=>{
     const left=Math.max(0,Math.round((end-Date.now())/1000));
     if(!left){stopLive("Stopped after "+Math.round(secs/60)+" minutes");$("live-again").hidden=false;return;}
-    say("Live · "+Math.floor(left/60)+":"+String(left%60).padStart(2,"0")+" left");
+    $("live-time").textContent=" · "+Math.floor(left/60)+":"+String(left%60).padStart(2,"0")+" left";  // ticks every second: no live role
   };
-  show();countdown=setInterval(show,1000);
+  say("Live");show();countdown=setInterval(show,1000);
 }
 function watchForVideo(mine){
   const v=$("live-video"),t=setTimeout(()=>{if(pc===mine&&!v.videoWidth)stopLive("Couldn't connect to the camera");},15000);
@@ -170,11 +173,12 @@ async function watch(cam){
     });
     if(pc!==mine)return;  // stopped while gathering
     const r=await fetch("/api/live/"+encodeURIComponent(cam),{method:"POST",headers:{"Content-Type":"application/sdp"},body:mine.localDescription.sdp});
-    const out=await r.json();
+    const out=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(out.error||"Live view failed");
     if(pc!==mine){closeOnRing(out.session);return;}
     session=out.session;
     await mine.setRemoteDescription({type:"answer",sdp:out.answer});
+    if(pc!==mine)return;  // stopped while connecting
     startCountdown(out.expires_in);watchForVideo(mine);
   }catch(err){if(pc===mine)stopLive(err.message||"Couldn't connect to the camera");}
 }
@@ -184,5 +188,6 @@ $("live-again").onclick=()=>watch(currentCam);
 eventsEl.addEventListener("click",e=>{const b=e.target.closest("[data-watch]");if(b)watch(b.dataset.watch);});
 addEventListener("keydown",e=>{if(e.key==="Escape"&&!$("live").hidden){stopLive();$("live").hidden=true;}});
 addEventListener("pagehide",()=>{if(session)navigator.sendBeacon("/api/live/session/"+encodeURIComponent(session)+"/stop");});
-loadLive().then(()=>{tick();setInterval(tick,1000);setInterval(loadLive,30000);});
+tick();setInterval(tick,1000);
+loadLive();setInterval(loadLive,30000);  // separate: the lights never wait on the camera list
 </script></body></html>

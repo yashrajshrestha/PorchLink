@@ -213,6 +213,17 @@ class ApiTest(unittest.TestCase):
                        "application/sdp", "/api/live/session/", "sendBeacon", "data-watch", "Live view needs a Ring token"):
             self.assertIn(marker, body)
 
+    def test_page_live_script_is_robust_and_accessible(self):
+        self.start()
+        body = self.get("/")[2]
+        for marker in ("tick();setInterval(tick,1000);", "loadLive();setInterval(loadLive,30000);", "(r.cameras||[])",
+                       "Object.create(null)", "r.json().catch(()=>({}))", 'id="live-time"', 'aria-label="Watch '):
+            self.assertIn(marker, body)
+        self.assertNotIn("loadLive().then", body)  # lights never wait on the camera list
+        self.assertRegex(body, r"setRemoteDescription\([^\n]*\n\s*if\(pc!==mine\)return;")
+        self.assertIn('<span id="live-status" role="status">', body)
+        self.assertNotRegex(body, r'id="live-time"[^>]*role=')  # the ticking time is not a live region
+
     def test_status_endpoint(self):
         self.start(status=lambda: {"mode": "Ring API", "ring_ok": True, "night": True, "time": "10:52 PM", "day": "Thu"})
         code, ctype, body = self.get("/api/status")
