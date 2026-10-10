@@ -34,6 +34,36 @@ class WorkerTest(unittest.TestCase):
     def duplicate_of(self, event_id):
         return self.store.db.execute("SELECT duplicate_of FROM events WHERE id=?", (event_id,)).fetchone()[0]
 
+    def test_doorbell_lane_does_not_wait_behind_slow_motion(self):
+        gate, seen = threading.Event(), []
+
+        def process(e, name):
+            if e["event_type"] == "motion_detected":
+                gate.wait(5)  # the AI is still describing this motion event
+            seen.append(e["id"])
+
+        w = EventWorker(self.store, process, lanes=("doorbell", "main"),
+                        lane_for=lambda e: "doorbell" if e["event_type"] == "button_press" else "main").start()
+        w.submit(ev("m1"), "Front")
+        w.submit(ev("d1", start=1_005_000, kind="button_press"), "Front")
+        for _ in range(200):
+            if seen:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(seen, ["d1"])  # handled while the motion event was still blocked
+        gate.set()
+        self.assertTrue(w.drain(5))
+        self.assertEqual(seen, ["d1", "m1"])
+        self.assertEqual({self.store.status("m1"), self.store.status("d1")}, {"done"})
+
+    def test_one_lane_by_default(self):
+        order = []
+        w = EventWorker(self.store, lambda e, name: order.append(e["id"])).start()
+        for i in range(5):
+            w.submit(ev(f"e{i}", start=1_000_000 + i * 60_000, kind="button_press" if i % 2 else "motion_detected"), "Front")
+        self.assertTrue(w.drain(5))
+        self.assertEqual(order, ["e0", "e1", "e2", "e3", "e4"])  # strictly in order, one thread
+
     def test_window_constant(self):
         self.assertEqual(DUPLICATE_WINDOW_MS, 15_000)
 

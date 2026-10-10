@@ -110,9 +110,17 @@ class AppAgainstSimTest(SimTestCase):
         """Injected 500s, duplicated and shuffled history, Ring-style webhook re-deliveries and forged webhooks.
         Poll and signed webhooks race through the real endpoint into one worker: every door event is handled
         exactly once, by exactly one route, and every forgery is refused."""
+        self.chaos_run()
+
+    def test_monkey_chaos_with_a_doorbell_lane(self):
+        """The same chaos with the app's two lanes (presses and motion handled in parallel)."""
+        self.chaos_run(lanes=("doorbell", "main"),
+                       lane_for=lambda ev: "doorbell" if ev["event_type"] == "button_press" else "main")
+
+    def chaos_run(self, **lanes):
         ring = self.start(chaos=0.5)
         worker = EventWorker(self.store, app.make_process(self.store, self.alerter, Settings(), TZ),
-                             name_for=app.DeviceNames(ring)).start()
+                             name_for=app.DeviceNames(ring), **lanes).start()
         server = web.make_server(self.store, TZ, 0, worker.submit, None, SECRET)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)

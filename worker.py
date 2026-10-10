@@ -1,7 +1,9 @@
-"""One thread handles every Ring event, from the poller and from webhooks, one at a time.
+"""Worker threads handle every Ring event, from the poller and from webhooks, one at a time per lane.
 
 Serial handling removes races (cooldowns, burst counting), and an event is marked done only after it was
 actually handled: a failure is retried when the poll sees the event again, up to max_attempts.
+By default there is one lane. The app gives doorbell presses their own lane, so a press never waits behind
+a motion event whose picture the AI is still describing.
 """
 import queue, threading, time
 
@@ -9,9 +11,11 @@ DUPLICATE_WINDOW_MS = 15_000  # same press seen by webhook and by history: start
 
 
 class EventWorker:
-    def __init__(self, store, process, name_for=None, max_attempts=3):
+    def __init__(self, store, process, name_for=None, max_attempts=3, lanes=("main",), lane_for=None):
+        """lane_for(ev) picks one of `lanes`; each lane has its own queue and thread."""
         self.store, self.process, self.name_for, self.max_attempts = store, process, name_for, max_attempts
-        self.queue = queue.Queue()
+        self.queues = {lane: queue.Queue() for lane in lanes}
+        self.lane_for = lane_for or (lambda ev: lanes[0])
         self.inflight, self.inflight_lock = set(), threading.Lock()  # ids queued or being handled
 
     def submit(self, ev, name=None):
@@ -22,16 +26,17 @@ class EventWorker:
             if ev["id"] in self.inflight:
                 return False
             self.inflight.add(ev["id"])
-        self.queue.put((ev, name))
+        self.queues[self.lane_for(ev)].put((ev, name))
         return True
 
     def start(self):
-        threading.Thread(target=self._run, name="porchlink-worker", daemon=True).start()
+        for lane, q in self.queues.items():
+            threading.Thread(target=self._run, args=(q,), name=f"porchlink-worker-{lane}", daemon=True).start()
         return self
 
-    def _run(self):
+    def _run(self, q):
         while True:
-            ev, name = self.queue.get()
+            ev, name = q.get()
             try:
                 self.handle(ev, name)
             except Exception as e:
@@ -39,14 +44,17 @@ class EventWorker:
             finally:
                 with self.inflight_lock:
                     self.inflight.discard(ev.get("id"))
-                self.queue.task_done()
+                q.task_done()
+
+    def _unfinished(self):
+        return sum(q.unfinished_tasks for q in self.queues.values())
 
     def drain(self, timeout=5):
-        """Wait until every queued event is handled (tests). True if the queue emptied in time."""
+        """Wait until every queued event is handled (tests). True if the queues emptied in time."""
         deadline = time.monotonic() + timeout
-        while self.queue.unfinished_tasks and time.monotonic() < deadline:
+        while self._unfinished() and time.monotonic() < deadline:
             time.sleep(0.01)
-        return not self.queue.unfinished_tasks
+        return not self._unfinished()
 
     def handle(self, ev, name=None):
         """Handle one event at most once. Returns "done", "failed", "duplicate", or None when skipped."""

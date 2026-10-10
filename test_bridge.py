@@ -336,6 +336,43 @@ class DeciderFlowTest(unittest.TestCase):
         self.assertNotIn("Decider:", body)
 
 
+class DoorbellFirstTest(unittest.TestCase):
+    """A doorbell press flashes before the AI looks at the picture: a deaf user must see the press now."""
+
+    def handle(self, event_type):
+        order = []
+
+        class Lights:
+            def publish(self, topic, payload):
+                order.append("light")
+
+        class Alerter:
+            def send(self, subject, body):
+                return True
+
+        def describe(e):
+            order.append("describe")
+            return "A man stands at the door."
+
+        store = Store(":memory:")
+        ev = {"id": "e1", "device_id": "d1", "start_ms": NIGHT_MS, "end_ms": NIGHT_MS + 10_000,
+              "event_type": event_type, "sub_type": None, "source": "poll"}
+        store.begin(ev, "Front Door")
+        app.handle_event(ev, "Front Door", store, Alerter(), Settings(), TZ, describe=describe, bridge=Bridge(CONFIG, Lights()))
+        return order, store
+
+    def test_doorbell_flashes_before_the_ai_describes(self):
+        order, store = self.handle("button_press")
+        self.assertEqual(order, ["light", "describe"])
+        self.assertEqual([r[0] for r in store.db.execute("SELECT automation FROM actions")], ["Visual doorbell"])
+        self.assertEqual(store.db.execute("SELECT description FROM events").fetchone()[0], "A man stands at the door.")
+
+    def test_motion_is_described_before_its_lights(self):
+        order, _ = self.handle("motion_detected")
+        self.assertEqual(order[0], "describe")
+        self.assertIn("light", order)
+
+
 class IotCoreTest(unittest.TestCase):
     def test_publishes_json_qos1_to_ats_endpoint(self):
         class StubData:

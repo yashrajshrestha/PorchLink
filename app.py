@@ -50,6 +50,10 @@ def handle_event(ev, name, store, alerter, settings, tz, describe=None, bridge=N
     if not reasons:
         return
     kinds = {k for k, _ in reasons}
+    doorbell = ev["event_type"] == "button_press"
+    # A press acts before the AI looks at the picture (seconds later): a deaf user must see it now. Its rules
+    # never use the description or Decider (see bridge.matches).
+    actions = bridge.run(ev, kinds, None, name) if bridge and doorbell else []
     description = describe(ev) if describe else None
     if description:
         store.set_description(ev["id"], description)
@@ -60,7 +64,8 @@ def handle_event(ev, name, store, alerter, settings, tz, describe=None, bridge=N
                                  SEEN_QUESTION, SEEN_OPTIONS)
         if decision:
             store.set_decision(ev["id"], decision["label"], decision["p"])
-    actions = bridge.run(ev, kinds, description, name, decision) if bridge else []
+    if bridge and not doorbell:
+        actions = bridge.run(ev, kinds, description, name, decision)
     if actions:
         store.add_actions(ev["id"], actions)
     subject, body = format_alert(ev, name, reasons, tz, description, [describe_action(a) for a in actions], decision)
@@ -207,8 +212,10 @@ def main():
     whep_base = env.get("RING_WHEP_BASE") or ("" if fake else env.get("RING_BASE_URL", "https://api.amazonvision.com"))
     live = LiveViews(env.get("RING_TOKEN") or "sim-token", whep_base,
                      lambda: [{"id": i, "name": n} for i, n in names.all().items()]) if whep_base else None
+    # Doorbell presses get their own lane, so a press never queues behind a motion event the AI is describing.
     worker = EventWorker(store, make_process(store, alerter, settings, tz, describe, bridge, decide),
-                         name_for=names).start()
+                         name_for=names, lanes=("doorbell", "main"),
+                         lane_for=lambda ev: "doorbell" if ev["event_type"] == "button_press" else "main").start()
     webhook_secret = env.get("RING_WEBHOOK_SECRET", "")
     health = {}
     status = make_status(health, settings, tz, poll_seconds, "FAKE mode" if fake else "Ring API")
