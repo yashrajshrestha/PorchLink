@@ -205,6 +205,13 @@ class ApiTest(unittest.TestCase):
         with urllib.request.urlopen(self.base + path, timeout=5) as r:
             return r.status, r.headers.get("Content-Type"), r.read().decode()
 
+    def test_tiles_draw_a_light_bulb(self):
+        self.start()
+        body = self.get("/")[2]
+        for marker in ('class="glass"', 'class="base"', 'class="filament"', "drop-shadow"):
+            self.assertIn(marker, body)
+        self.assertNotIn("border-radius:50%;background:#232833", body)  # the old plain circle
+
     def test_page_has_watch_live(self):
         self.start()
         body = self.get("/")[2]

@@ -12,21 +12,31 @@ main{max-width:1100px;margin:0 auto;padding:28px 24px 48px}
 .dot.ok{background:#34d399;box-shadow:0 0 8px #34d399}.dot.bad{background:#f87171;box-shadow:0 0 8px #f87171}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px}
 .tile{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:20px;min-height:168px;transition:background .3s,border-color .3s}
-.bulb{width:64px;height:64px;border-radius:50%;background:#232833;border:2px solid #2f3643;margin-bottom:16px}
+.bulb{width:48px;height:64px;margin-bottom:16px}
+.bulb svg{display:block;width:100%;height:100%;overflow:visible}
+.bulb .glass{fill:#232833;stroke:#3a4250;stroke-width:2}
+.bulb .filament{fill:none;stroke:#4a5260;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.bulb .shine{fill:rgba(255,255,255,.06)}
+.bulb .base{fill:#3a4250}
 .room{font-size:14px;color:var(--muted);font-weight:600}
 .state{font-size:24px;font-weight:800;margin-top:2px}
 .why{font-size:13px;color:var(--muted);margin-top:4px;min-height:1.2em}
 .tile.on{border-color:#5a4416;background:linear-gradient(180deg,#241d0f,var(--card) 70%)}
-.tile.on .bulb,.tile.flash .bulb{background:radial-gradient(circle at 40% 35%,#fff4c2,#ffbf3a 50%,#e8870b);border-color:#ffb020}
+.tile.on .glass,.tile.flash .glass{fill:#ffc24d;stroke:#ffb020}
+.tile.on .filament,.tile.flash .filament{stroke:#fff4c2}
+.tile.on .shine,.tile.flash .shine{fill:rgba(255,255,255,.55)}
+.tile.on .base,.tile.flash .base{fill:#8a7a5c}
 .tile.on .bulb{animation:breathe 2.4s ease-in-out infinite}
 .tile.flash{border-color:#6b4f12;background:linear-gradient(180deg,#2a210f,var(--card) 70%)}
 .tile.flash .bulb{animation:flash .6s steps(1) infinite}
-.tile.pulse .bulb{background:radial-gradient(circle at 40% 35%,#fff8de,#ffd98a 55%,#d8a33c);border-color:#c99a3a;animation:pulse 2.6s ease-in-out infinite}
+.tile.pulse .glass{fill:#ffd98a;stroke:#c99a3a}.tile.pulse .filament{stroke:#fff8de}
+.tile.pulse .shine{fill:rgba(255,255,255,.45)}.tile.pulse .base{fill:#7d7158}
+.tile.pulse .bulb{animation:pulse 2.6s ease-in-out infinite}
 .tile.on .state,.tile.flash .state{color:var(--amber)}.tile.pulse .state{color:#f3d58c}
-@keyframes breathe{0%,100%{box-shadow:0 0 22px 6px rgba(var(--glow),.5)}50%{box-shadow:0 0 44px 14px rgba(var(--glow),.9)}}
-@keyframes flash{0%,49%{opacity:1}50%,100%{opacity:.2}}
-@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,214,120,0);opacity:.55}50%{box-shadow:0 0 28px 8px rgba(255,214,120,.6);opacity:1}}
-@media (prefers-reduced-motion:reduce){.tile .bulb{animation:none!important}.tile.flash .bulb{box-shadow:0 0 0 6px rgba(var(--glow),.9)}}
+@keyframes breathe{0%,100%{filter:drop-shadow(0 0 8px rgba(var(--glow),.55))}50%{filter:drop-shadow(0 0 22px rgba(var(--glow),.95))}}
+@keyframes flash{0%,49%{opacity:1;filter:drop-shadow(0 0 16px rgba(var(--glow),.9))}50%,100%{opacity:.2;filter:none}}
+@keyframes pulse{0%,100%{filter:drop-shadow(0 0 0 rgba(255,214,120,0));opacity:.55}50%{filter:drop-shadow(0 0 14px rgba(255,214,120,.7));opacity:1}}
+@media (prefers-reduced-motion:reduce){.tile .bulb{animation:none!important}.tile.on .bulb,.tile.flash .bulb{filter:drop-shadow(0 0 12px rgba(var(--glow),.95))}}
 .legend{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:18px}
 .legend[hidden]{display:none}
 .legend i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:7px;vertical-align:-1px}
@@ -41,7 +51,7 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute
 .empty,.note{color:var(--muted);background:var(--card);border:1px dashed var(--line);border-radius:16px;padding:18px;text-align:center}
 button{font:inherit;cursor:pointer}
 .right{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
-.watch{background:var(--amber);color:#1b1404;border:0;border-radius:999px;padding:8px 16px;font-weight:800}
+.watch{background:var(--amber);color:#1b1404;border:0;border-radius:999px;padding:8px 16px;font-weight:800;white-space:nowrap}
 .watch:disabled{background:#2a2f39;color:var(--muted);cursor:not-allowed}
 .watch.small{padding:4px 11px;font-size:12px}
 .acts{margin-left:auto;display:flex;gap:8px;align-items:center}
@@ -68,6 +78,9 @@ button{font:inherit;cursor:pointer}
 <h2>Door events · last 24 hours</h2>
 <div id="events"><div class="empty">No events yet.</div></div>
 </main><script>
+const BULB='<svg viewBox="0 0 48 64" aria-hidden="true"><path class="glass" d="M24 3C13.5 3 6 11 6 21.5c0 6.8 3.5 11.2 6.7 15 2.5 3 4.3 5.5 4.3 9h14c0-3.5 1.8-6 4.3-9 3.2-3.8 6.7-8.2 6.7-15C42 11 34.5 3 24 3z"/>'+
+  '<path class="filament" d="M19 31l2.5 4 2.5-4 2.5 4 2.5-4M21.5 35v10M26.5 35v10"/><ellipse class="shine" cx="16.5" cy="15.5" rx="3.5" ry="6" transform="rotate(25 16.5 15.5)"/>'+
+  '<rect class="base" x="16" y="47.5" width="16" height="4.5" rx="2"/><rect class="base" x="16.5" y="53.5" width="15" height="4.5" rx="2"/><path class="base" d="M20 59.5h8l-1.6 3h-4.8z"/></svg>';
 const ICON={doorbell:"🔔",package:"📦",vehicle:"🚗",person:"🧍",animal:"🐾",motion:"👣",live:"📹"};
 const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const clock=ms=>new Date(ms).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});
@@ -87,7 +100,7 @@ function renderTiles(ds){
   for(const d of ds){
     let el=tilesEl.querySelector('[data-id="'+CSS.escape(d.id)+'"]');
     if(!el){el=document.createElement("div");el.dataset.id=d.id;el.dataset.testid="tile-"+d.id;
-      el.innerHTML='<div class="bulb"></div><div class="room"></div><div class="state"></div><div class="why"></div>';tilesEl.appendChild(el);}
+      el.innerHTML='<div class="bulb">'+BULB+'</div><div class="room"></div><div class="state"></div><div class="why"></div>';tilesEl.appendChild(el);}
     const v=view(d),cls=("tile "+v.cls).trim();
     if(el.className!==cls)el.className=cls;  // only the class changes, so the bulb's animation keeps running
     setText(el,".room",d.name);setText(el,".state",v.state);setText(el,".why",v.why);
