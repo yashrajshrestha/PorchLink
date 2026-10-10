@@ -26,9 +26,11 @@ def state_text(camera, clock, night, ring_label, description):
 class DeciderClient:
     def __init__(self, env, opener=urllib.request.urlopen):
         self.url = env.get("DECIDER_URL", "http://127.0.0.1:8000").rstrip("/") + "/v1/systemone"
-        self.timeout = float(env.get("DECIDER_TIMEOUT", 30))  # one worker thread: a slow call delays later events; MPS about 0.4 s, CPU 7-17 s
+        self.timeout = float(env.get("DECIDER_TIMEOUT", 30))  # main worker lane: a slow call delays later motion; MPS about 0.3 s, CPU 7-17 s
         self.opener = opener
-        self.lock = threading.Lock()  # one question at a time: overlapping requests crash the server on Apple MPS
+        # One question at a time: overlapping requests crash the server on Apple MPS. The timeout is per socket
+        # read, so a call that times out frees the lock while the server may still be computing (slow CPU warm-up).
+        self.lock = threading.Lock()
 
     def choose(self, state, instructions, options):
         """Ask one multiple-choice question ({option: criterion}). Returns the most likely option as

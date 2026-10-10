@@ -1,9 +1,11 @@
 """Worker threads handle every Ring event, from the poller and from webhooks, one at a time per lane.
 
-Serial handling removes races (cooldowns, burst counting), and an event is marked done only after it was
-actually handled: a failure is retried when the poll sees the event again, up to max_attempts.
+Within a lane, events are handled in order. An event is marked done only after it was actually handled: a failure
+is retried when the poll sees the event again, up to max_attempts. Both copies of one press (poll and webhook) go
+to the same lane, so dedupe stays serial.
 By default there is one lane. The app gives doorbell presses their own lane, so a press never waits behind
-a motion event whose picture the AI is still describing.
+a motion event whose picture the AI is still describing. Work shared across lanes is locked: burst alerts are
+claimed under a lock in app.handle_event, and Bridge.plan holds a lock for cooldowns.
 """
 import queue, threading, time
 

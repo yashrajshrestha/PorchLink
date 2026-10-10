@@ -83,7 +83,7 @@ class Store:
 
     def begin(self, ev, name, max_attempts=3):
         """Claim an event for processing. True when it is new, or an earlier attempt failed (or was cut off
-        mid-way by a crash: only the single worker calls this, so a 'pending' row here is a leftover) and
+        mid-way by a crash: the worker never queues an id twice, so a 'pending' row here is a leftover) and
         attempts remain. False for done, duplicate and history events."""
         with self.lock, self.db:
             if self.db.execute(self._INSERT_EVENT, self._event_row(ev, name, "pending", 1)).rowcount == 1:
@@ -132,6 +132,14 @@ class Store:
             row = self.db.execute("SELECT MAX(event_start_ms) FROM alerts WHERE device_id=? AND kind=?",
                                   (device_id, kind)).fetchone()
         return row[0]
+
+    def clear_alerts(self, event_id):
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM alerts WHERE event_id=?", (event_id,))
+
+    def mark_delivered(self, event_id):
+        with self.lock, self.db:
+            self.db.execute("UPDATE alerts SET delivered=1 WHERE event_id=?", (event_id,))
 
     def add_alert(self, ev, kind, message, delivered):
         with self.lock, self.db:

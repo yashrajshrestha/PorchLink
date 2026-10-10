@@ -47,7 +47,8 @@ Preview the dashboard without Ring or AWS (every light state + sample events): `
 ## How it works
 
 1. Polls Ring **Event History** (`/v1/history/devices/{id}/events`) every `POLL_SECONDS`. Signed webhooks
-   and polls feed one worker, which handles each event once.
+   and polls feed the worker, which handles each event once. It has two lanes: doorbell presses, and
+   everything else, so a press never waits while the AI describes a motion picture.
 2. Stores new events in SQLite (`porchlink.db`). Each camera's existing history is recorded once, without
    alerts, on that camera's first successful poll.
 3. Rules (`rules.py`):
@@ -140,7 +141,7 @@ When the top answer's p is below `DECIDER_MIN_P` (default 0.5) the house gives a
 Doorbell presses and live views never ask Decider.
 If the server is down, rules fall back to their keywords, and night motion with no keyword match still lights the
 hallway ("Night light (AI off)"). The app sends one warm-up request at startup.
-Scores on 42 labelled descriptions: [docs/decider-eval.md](docs/decider-eval.md) (`python3 eval_decider.py`).
+Scores on 48 labelled descriptions: [docs/decider-eval.md](docs/decider-eval.md) (`python3 eval_decider.py`).
 
 ```bash
 .venv/bin/pip install strands-decider    # separate install: pulls torch (about 5 GB)
@@ -149,8 +150,9 @@ DECIDER_ENABLED=1 BEDROCK_ENABLED=1 AWS_PROFILE=<your own account> .venv/bin/pyt
 ```
 
 Speed: on a 12-core CPU it is 7 to 17 s per call (measured 2026-10-06 with the old 2-option design; first call 86 s).
-On Apple MPS it is about 0.3 s p50 ([docs/decider-eval.md](docs/decider-eval.md)). Calls run in the single worker
-thread, so a slow call delays later events. `DECIDER_TIMEOUT` defaults to 30 s.
+On Apple MPS it is about 0.3 s p50 ([docs/decider-eval.md](docs/decider-eval.md)). Calls run in the worker's
+main lane (never the doorbell lane), one at a time, so a slow call delays later motion events. `DECIDER_TIMEOUT`
+defaults to 30 s.
 
 If your `.env` still has `DECIDER_MIN_P=0.8` from an older copy, change it to 0.5, or most events will pulse "Not sure".
 The questions and cutoff were tuned on hand-written descriptions, not on real Nova Lite output: re-check with Bedrock on.

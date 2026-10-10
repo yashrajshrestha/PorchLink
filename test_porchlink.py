@@ -239,6 +239,72 @@ class RetryAgeTest(unittest.TestCase):
         self.assertEqual(self.poll(None, 20 * 60_000), ["a-1"])
 
 
+class BurstAcrossLanesTest(unittest.TestCase):
+    """Doorbell presses and motion run in parallel lanes; a busy door still gets one burst alert per window."""
+
+    def test_one_burst_alert_when_a_press_lands_while_motion_is_described(self):
+        import threading
+        store, gate, describing = Store(":memory:"), threading.Event(), threading.Event()
+
+        class Alerter:
+            def send(self, subject, body):
+                return True
+
+        def describe(e):
+            if e["id"] == "m3":  # the AI is still looking at the motion event that makes the burst
+                describing.set()
+                gate.wait(5)
+            return None
+
+        worker = EventWorker(store, app.make_process(store, Alerter(), Settings(), TZ, describe=describe),
+                             lanes=("doorbell", "main"),
+                             lane_for=lambda e: "doorbell" if e["event_type"] == "button_press" else "main").start()
+
+        def event(eid, minute, kind="motion_detected"):
+            start = ms(2026, 10, 9, 14, minute)
+            return {"id": eid, "device_id": "d1", "start_ms": start, "end_ms": start + 5000, "event_type": kind,
+                    "sub_type": None, "source": "poll"}
+
+        for eid, minute in (("m1", 0), ("m2", 1)):
+            worker.submit(event(eid, minute), "Front Door")
+        self.assertTrue(worker.drain(5))
+        worker.submit(event("m3", 2), "Front Door")
+        self.assertTrue(describing.wait(5))
+        worker.submit(event("p1", 3, "button_press"), "Front Door")
+        for _ in range(200):  # the press finishes in its own lane while m3 is still blocked
+            if store.status("p1") == "done":
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(store.status("p1"), "done")
+        gate.set()
+        self.assertTrue(worker.drain(5))
+        bursts = [r[0] for r in store.db.execute("SELECT event_id FROM alerts WHERE kind='burst'")]
+        self.assertEqual(bursts, ["m3"])
+        delivered = {r[0]: r[1] for r in store.db.execute("SELECT event_id, MIN(delivered) FROM alerts GROUP BY event_id")}
+        self.assertEqual(delivered, {"m1": 1, "m2": 1, "m3": 1, "p1": 1})
+
+    def test_a_retry_replaces_its_earlier_alert_claim(self):
+        store = Store(":memory:")
+        start = ms(2026, 10, 9, 14, 0)
+        e = {"id": "e1", "device_id": "d1", "start_ms": start, "end_ms": start, "event_type": "button_press",
+             "sub_type": None, "source": "poll"}
+
+        class Failing:
+            def send(self, subject, body):
+                raise ConnectionError("smtp down")
+
+        class Ok:
+            def send(self, subject, body):
+                return True
+
+        store.begin(e, "Front Door")
+        with self.assertRaises(ConnectionError):
+            app.handle_event(e, "Front Door", store, Failing(), Settings(), TZ)
+        app.handle_event(e, "Front Door", store, Ok(), Settings(), TZ)
+        rows = store.db.execute("SELECT kind, delivered FROM alerts WHERE event_id='e1'").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [("doorbell", 1)])
+
+
 class EmailTest(unittest.TestCase):
     ENV = {"SMTP_HOST": "smtp.example.com", "SMTP_USER": "me@example.com", "SMTP_PASSWORD": "x", "ALERT_TO": "care@example.com"}
 

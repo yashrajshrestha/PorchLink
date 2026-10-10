@@ -68,7 +68,7 @@ The old "Night path light" (any night motion → hallway on) is **replaced** by 
 
 - `description_has` matches whole words (plural -s/-es allowed) and ignores anything after a negation (no/not/nobody/none/without/never/n't) in the same sentence. Example: "no person is visible" does not mention a person, and "cardboard" is not "car".
 - Decider is asked only for `motion_detected` events. Live views and doorbell presses never ask it.
-- `DECIDER_TIMEOUT` defaults to 30 s, because calls run in the single worker thread.
+- `DECIDER_TIMEOUT` defaults to 30 s, because calls run in the worker's main lane, one at a time. Since 2026-10-10, doorbell presses have their own lane and never wait on Decider.
 - The eval headline also reports "right and sure" (p ≥ min_p).
 
 ### Change after the first full simulator run (2026-10-10)

@@ -2,6 +2,7 @@
 Ring event -> rules -> actions -> email flow (fake Ring server, stub Bedrock). Run: python3 -m unittest test_bridge -v
 """
 import json, os, unittest
+from unittest import mock
 from datetime import datetime
 
 import app
@@ -83,6 +84,18 @@ class MatchTest(unittest.TestCase):
         self.addCleanup(os.remove, bad)
         with self.assertRaises(ValueError):
             load_config(bad)
+
+    def test_config_warns_that_press_rules_cannot_use_the_description(self):
+        path = os.path.join(HERE, "sim", "_press_words.json")
+        with open(path, "w") as f:
+            json.dump({"devices": [{"id": "l", "name": "Lamp", "type": "light"}], "automations": [
+                {"name": "Courier ring", "when": {"kind": ["doorbell"], "description_has": ["courier"]},
+                 "do": [{"device": "l", "action": "flash"}]}]}, f)
+        self.addCleanup(os.remove, path)
+        with mock.patch("builtins.print") as printed:
+            load_config(path)
+        self.assertIn("Courier ring", printed.call_args[0][0])
+        self.assertIn("never matches a press", printed.call_args[0][0])
 
 
 class BridgeTest(unittest.TestCase):
@@ -340,7 +353,7 @@ class DoorbellFirstTest(unittest.TestCase):
     """A doorbell press flashes before the AI looks at the picture: a deaf user must see the press now."""
 
     def handle(self, event_type):
-        order = []
+        order, store, emails = [], Store(":memory:"), []
 
         class Lights:
             def publish(self, topic, payload):
@@ -348,13 +361,15 @@ class DoorbellFirstTest(unittest.TestCase):
 
         class Alerter:
             def send(self, subject, body):
+                emails.append(body)
                 return True
 
         def describe(e):
-            order.append("describe")
+            recorded = store.db.execute("SELECT COUNT(*) FROM actions").fetchone()[0]
+            order.append(f"describe (actions recorded: {recorded})")
             return "A man stands at the door."
 
-        store = Store(":memory:")
+        self.emails = emails
         ev = {"id": "e1", "device_id": "d1", "start_ms": NIGHT_MS, "end_ms": NIGHT_MS + 10_000,
               "event_type": event_type, "sub_type": None, "source": "poll"}
         store.begin(ev, "Front Door")
@@ -363,13 +378,14 @@ class DoorbellFirstTest(unittest.TestCase):
 
     def test_doorbell_flashes_before_the_ai_describes(self):
         order, store = self.handle("button_press")
-        self.assertEqual(order, ["light", "describe"])
+        self.assertEqual(order, ["light", "describe (actions recorded: 1)"])  # flashed and on the dashboard first
         self.assertEqual([r[0] for r in store.db.execute("SELECT automation FROM actions")], ["Visual doorbell"])
         self.assertEqual(store.db.execute("SELECT description FROM events").fetchone()[0], "A man stands at the door.")
+        self.assertIn("Living room light flash x3 (Visual doorbell)", self.emails[0])  # still in the email
 
     def test_motion_is_described_before_its_lights(self):
         order, _ = self.handle("motion_detected")
-        self.assertEqual(order[0], "describe")
+        self.assertEqual(order[0], "describe (actions recorded: 0)")
         self.assertIn("light", order)
 
 

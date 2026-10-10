@@ -40,20 +40,31 @@ def settings_from_env(env):
                     alert_every_event=env.get("ALERT_EVERY_EVENT", "1") == "1")
 
 
+_ALERT_RULES = threading.Lock()  # the doorbell and main lanes must not both count the same burst
+
+
 def handle_event(ev, name, store, alerter, settings, tz, describe=None, bridge=None, decide=None):
     """Apply rules to one new event, ask Decider what is at the door, run home automations, send one email,
     record everything. describe(ev) is optional (Bedrock); it runs only for events that will alert, to keep
     cost down. decide (a DeciderClient) is optional; it is asked once per described motion event, never for a
     doorbell press or a live view (the state text says "saw motion")."""
-    recent = store.starts_since(ev["device_id"], ev["start_ms"] - settings.burst_minutes * 60_000)
-    reasons = evaluate(ev, recent, store.last_alert_start(ev["device_id"], "burst"), settings, tz)
+    with _ALERT_RULES:  # claim the alerts before any slow work, so the other lane sees this burst
+        recent = store.starts_since(ev["device_id"], ev["start_ms"] - settings.burst_minutes * 60_000)
+        reasons = evaluate(ev, recent, store.last_alert_start(ev["device_id"], "burst"), settings, tz)
+        store.clear_alerts(ev["id"])  # a retry replaces its own earlier claim
+        for kind, reason in reasons:
+            store.add_alert(ev, kind, reason, False)  # marked delivered once the email has gone
     if not reasons:
         return
     kinds = {k for k, _ in reasons}
     doorbell = ev["event_type"] == "button_press"
-    # A press acts before the AI looks at the picture (seconds later): a deaf user must see it now. Its rules
-    # never use the description or Decider (see bridge.matches).
-    actions = bridge.run(ev, kinds, None, name) if bridge and doorbell else []
+    actions = []
+    if bridge and doorbell:
+        # A press acts before the AI looks at the picture (seconds later): a deaf user must see it now. So press
+        # rules get no description: `description_has` never matches a doorbell press (see bridge.load_config).
+        actions = bridge.run(ev, kinds, None, name)
+        if actions:
+            store.add_actions(ev["id"], actions)  # on the dashboard now too, not after the AI
     description = describe(ev) if describe else None
     if description:
         store.set_description(ev["id"], description)
@@ -66,12 +77,11 @@ def handle_event(ev, name, store, alerter, settings, tz, describe=None, bridge=N
             store.set_decision(ev["id"], decision["label"], decision["p"])
     if bridge and not doorbell:
         actions = bridge.run(ev, kinds, description, name, decision)
-    if actions:
-        store.add_actions(ev["id"], actions)
+        if actions:
+            store.add_actions(ev["id"], actions)
     subject, body = format_alert(ev, name, reasons, tz, description, [describe_action(a) for a in actions], decision)
-    delivered = alerter.send(subject, body)
-    for kind, reason in reasons:
-        store.add_alert(ev, kind, reason, delivered)
+    if alerter.send(subject, body):
+        store.mark_delivered(ev["id"])
 
 
 class DeviceNames:

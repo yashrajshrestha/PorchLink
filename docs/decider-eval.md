@@ -1,8 +1,8 @@
 # Strands Decider eval — 2026-10-10
 
-Model `strands-decider-2B-hobson-v21` on Apple Silicon Mac, PyTorch MPS. One `choice` question, "What is at the door in this camera frame?", with the 5 options in `decider.SEEN_OPTIONS`; state text as in `decider.state_text`. Cases: `eval/decider_cases.json` (42 hand-written descriptions in the style of Bedrock Nova, plus 6 written by the local vision model qwen2.5vl:3b for the simulator's pictures). The option wording was tuned on these same cases, so this is not a held-out score.
+Model `strands-decider-2B-hobson-v21` on Apple Silicon Mac, PyTorch MPS. One `choice` question, "What is at the door in this camera frame?", with the 5 options in `decider.SEEN_OPTIONS`; state text as in `decider.state_text`. Cases: `eval/decider_cases.json` (hand-written descriptions in the style of Bedrock Nova, plus descriptions the local vision model qwen2.5vl:3b wrote for the simulator's pictures). The option wording was tuned on these same cases, so this is not a held-out score.
 
-**48/48 right** · **43/48 right and sure** (p ≥ 0.5: the light pattern fires) · unsure (p < 0.5, the house pulses "Not sure") 5 · failed calls 0 · latency p50 299 ms, p95 306 ms
+**48/48 right** · **43/48 right and sure** (p ≥ 0.5: the light pattern fires) · unsure (p < 0.5, the house pulses "Not sure") 5 · failed calls 0 · latency p50 301 ms, p95 315 ms
 
 | class | cases | right |
 |---|---|---|

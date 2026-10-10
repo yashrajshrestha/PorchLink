@@ -18,6 +18,9 @@ def load_config(path):
         for step in a["do"]:
             if step["device"] not in ids:
                 raise ValueError(f"automation '{a['name']}' uses unknown device '{step['device']}'")
+        if "doorbell" in a["when"].get("kind", []) and "description_has" in a["when"]:
+            print(f"(automation '{a['name']}': a doorbell press acts before the AI describes the picture, "
+                  f"so description_has never matches a press)")
     return cfg
 
 
@@ -68,12 +71,16 @@ class Bridge:
         self.config, self.publisher, self.clock = config, publisher, clock
         self.min_p = min_p  # Decider's top option needs at least this p for a `seen` automation
         self.devices = {d["id"]: d for d in config["devices"]}
-        self.last_fired = {}
+        self.last_fired, self.lock = {}, threading.Lock()  # two worker lanes call plan(): cooldowns stay exact
 
     def plan(self, kinds, description, source_name, at, decision=None):
         """Return (automation, step, decision_p) triples to run for an event at time `at` (epoch seconds).
         decision is Decider's answer or None; decision_p is its p for automations that used it (`seen` or
         `unsure`), else None. Cooldowns use event time, so a backlog processed at once is not wrongly suppressed."""
+        with self.lock:
+            return self._plan(kinds, description, source_name, at, decision)
+
+    def _plan(self, kinds, description, source_name, at, decision):
         out = []
         for a in self.config["automations"]:
             cooldown = a.get("cooldown_s", 0)
