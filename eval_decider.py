@@ -49,7 +49,9 @@ def report(s, min_p, model, hardware, day):
         f"# Strands Decider eval — {day}", "",
         f"Model `{model}` on {hardware}. One `choice` question, \"{SEEN_QUESTION}\", with the 5 options in "
         f"`decider.SEEN_OPTIONS`; state text as in `decider.state_text`. Cases: `eval/decider_cases.json` "
-        f"(hand-written descriptions in the style of Bedrock Nova; the option wording was picked on 15 of them).", "",
+        f"(42 hand-written descriptions in the style of Bedrock Nova, plus 6 written by the local vision model "
+        f"qwen2.5vl:3b for the simulator's pictures). The option wording was tuned on these same cases, so this is "
+        f"not a held-out score.", "",
         f"**{s['right']}/{s['cases']} right** · **{s['sure_right']}/{s['cases']} right and sure** (p ≥ {min_p}: the "
         f"light pattern fires) · unsure (p < {min_p}, the house pulses \"Not sure\") {s['unsure']} · "
         f"failed calls {s['failed']} · latency {latency}", "",

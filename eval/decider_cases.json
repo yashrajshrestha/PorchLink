@@ -9,7 +9,7 @@
   {"description": "A parcel with a shipping label is propped against the wall by the door.", "time": "night", "sub_type": null, "expect": ["package"]},
   {"description": "A man in a hoodie stands near the door, looking around.", "time": "night", "sub_type": "human", "expect": ["person"]},
   {"description": "A woman rings the doorbell holding flowers.", "time": "day", "sub_type": "human", "expect": ["person"]},
-  {"description": "A courier is holding a box at the door.", "time": "day", "sub_type": "human", "expect": ["person", "package"]},
+  {"description": "A courier is holding a box at the door.", "time": "day", "sub_type": "human", "expect": ["person"]},
   {"description": "A child waves at the camera.", "time": "day", "sub_type": "human", "expect": ["person"]},
   {"description": "Two people walk up the path toward the door.", "time": "night", "sub_type": "human", "expect": ["person"]},
   {"description": "A delivery driver in a uniform walks away from the porch.", "time": "day", "sub_type": "human", "expect": ["person"]},
@@ -40,5 +40,11 @@
   {"description": "Nothing notable at this location.", "time": "night", "sub_type": null, "expect": ["nothing"]},
   {"description": "Leaves are scattered on the front steps.", "time": "day", "sub_type": null, "expect": ["nothing"]},
   {"description": "A sprinkler is watering the lawn.", "time": "day", "sub_type": null, "expect": ["nothing"]},
-  {"description": "A flower pot and a bench beside the door; no one is there.", "time": "day", "sub_type": null, "expect": ["nothing"]}
+  {"description": "A flower pot and a bench beside the door; no one is there.", "time": "day", "sub_type": null, "expect": ["nothing"]},
+  {"description": "A man in a maroon shirt and red shorts is standing outside a white door, holding a cardboard box.", "time": "night", "sub_type": "human", "expect": ["person"]},
+  {"description": "A man in a maroon shirt and red shorts is standing at a white door, holding a cardboard box.", "time": "night", "sub_type": null, "expect": ["person"]},
+  {"description": "A man in a maroon shirt and red shorts is delivering a cardboard box to a white door with a black shutter.", "time": "day", "sub_type": "human", "expect": ["person"]},
+  {"description": "An Amazon Prime package is delivered to a wooden door with the number 2252.", "time": "night", "sub_type": "human", "expect": ["package"]},
+  {"description": "The door has a package on it, but no people or animals are visible.", "time": "night", "sub_type": null, "expect": ["package"]},
+  {"description": "A silver Mercedes-Benz sedan is parked on a brick driveway in front of a house.", "time": "night", "sub_type": null, "expect": ["vehicle"]}
 ]

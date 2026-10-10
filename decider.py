@@ -10,7 +10,7 @@ DEFAULT_MIN_P = 0.5  # top-option p below this means "not sure"; chosen by the p
 SEEN_QUESTION = "What is at the door in this camera frame?"
 SEEN_OPTIONS = {
     "package": "a package, parcel, box or envelope left at the door",
-    "person": "a person is visible",
+    "person": "a person is visible, even one carrying or delivering a box",  # someone at the door outranks their parcel
     "vehicle": "a real car, truck or van is visible",
     "animal": "an animal is visible and no person",
     "nothing": "no person, animal, vehicle or package: empty scene, shadows, signs, toys or food",

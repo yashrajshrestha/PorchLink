@@ -20,7 +20,7 @@ Out of scope:
    - **Question `seen`:** "What is at the door in this camera frame?"
    - **Options and criteria** (exact; wording chosen by the probe below):
      - `package`: "a package, parcel, box or envelope left at the door"
-     - `person`: "a person is visible"
+     - `person`: "a person is visible, even one carrying or delivering a box" (changed 2026-10-10, see below)
      - `vehicle`: "a real car, truck or van is visible"
      - `animal`: "an animal is visible and no person"
      - `nothing`: "no person, animal, vehicle or package: empty scene, shadows, signs, toys or food"
@@ -70,6 +70,13 @@ The old "Night path light" (any night motion → hallway on) is **replaced** by 
 - Decider is asked only for `motion_detected` events. Live views and doorbell presses never ask it.
 - `DECIDER_TIMEOUT` defaults to 30 s, because calls run in the single worker thread.
 - The eval headline also reports "right and sure" (p ≥ min_p).
+
+### Change after the first full simulator run (2026-10-10)
+
+- A man holding a box at the back door at night came out as "package 0.51", so the 3-light visitor flash never fired.
+- The `person` wording now says "even one carrying or delivering a box": someone at the door outranks their parcel.
+- On 48 cases (the 42 eval cases plus 6 real qwen2.5vl:3b descriptions from the run), the old wording got 45/48 right with 37 right and sure. The new wording got 48/48 right, with 43 right and sure.
+- Rewording `package` as well ("with no person in view") was rejected. It turned a pizza box, a plastic bag and leaves into "package".
 
 ## Components
 
