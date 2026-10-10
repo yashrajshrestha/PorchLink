@@ -1,61 +1,217 @@
 """Local web dashboard: the home's lights (virtual devices) and the last 24 hours of door events."""
-import html, json, time
-from datetime import datetime
+import json, os, re, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 
 from bridge import describe_action
+from decider import DEFAULT_MIN_P
+from live import LiveError, MAX_OFFER_BYTES
+from webhooks import parse_webhook, verify_signature
 
-PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>PorchLink</title>
-<style>
-body{{font:15px system-ui;margin:24px;max-width:860px;background:#fafafa;color:#1d1d1f}}
-table{{border-collapse:collapse;width:100%;background:#fff}} td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}
-.alert{{color:#b3261e;font-weight:600}} small{{color:#555}} .act{{color:#0b6b3a}}
-#devices{{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin:12px 0 24px}}
-.dev{{background:#fff;border:1px solid #ddd;border-radius:12px;padding:14px}}
-.bulb{{font-size:38px;filter:grayscale(1) opacity(.35)}} .on .bulb{{filter:none;text-shadow:0 0 18px #ffd60a}}
-.flash .bulb{{animation:f .5s steps(1) infinite}} @keyframes f{{50%{{filter:grayscale(1) opacity(.35)}}}}
-</style></head><body><h1>PorchLink</h1>
-{devices_block}
-<h2>Door events (last 24 hours)</h2>
-<table><tr><th>Time</th><th>Where</th><th>Length</th><th>Alert and home actions</th></tr>{rows}</table>
-<script>
-async function tick(){{
-  const box=document.getElementById('devices'); if(!box) return;
-  const ds=await (await fetch('/api/devices')).json();
-  box.innerHTML=ds.map(d=>`<div class="dev ${{d.flashing?'flash':d.on?'on':''}}"><div class="bulb">💡</div>
-    <b>${{d.name}}</b><br><small>${{d.flashing?'flashing':d.on?'ON, '+Math.ceil(d.seconds_left/60)+' min left':'off'}}</small>
-    ${{d.last?'<br><small>last: '+d.last.automation+'</small>':''}}</div>`).join('');
-}}
-tick(); setInterval(tick,1000); setTimeout(()=>location.reload(),15000);
-</script></body></html>"""
+MAX_WEBHOOK_BYTES = 65_536  # Ring webhooks are small; refuse anything bigger before reading it
+REQUEST_TIMEOUT = 10  # seconds a client may stall on the socket before its connection is dropped
+CHIP_SURE = 0.8  # older rows (one yes/no Decider question per automation): below this was "not sure"
+CHIP_NO = 0.5  # older rows: with nothing fired, below this was a confident "no", a skipped false alarm
+
+_ICON_WORDS = (("package", r"packages?|parcels?|box(es)?"), ("vehicle", r"cars?|vehicles?|trucks?|vans?"),
+               ("animal", r"cats?|dogs?|animals?|birds?"), ("person", r"person|people|man|woman|courier"))
 
 
-def serve(store, tz, port=8080, on_webhook=None, devices=None):
+def summarize(e, actions, min_p=DEFAULT_MIN_P):
+    """What the dashboard says about one door event: a headline, what the house did, a chip saying who
+    decided (a rule, or Decider's answer and how sure it was) and an icon key. Text is returned raw; the page escapes."""
+    kinds = [k for k in (e.get("kinds") or "").split(",") if k]
+    description = (e.get("description") or "").strip()
+    text = description.lower()
+    ran = [a for a in actions if not a.get("skipped")]  # includes failed commands, so the page can show FAILED
+    fired = [a for a in ran if a.get("ok")]
+    if "doorbell" in kinds:
+        headline, icon = "Doorbell pressed", "doorbell"
+    elif description:
+        headline = description
+        icon = next((key for key, words in _ICON_WORDS if re.search(rf"\b(?:{words})\b", text)), "motion")
+    elif e.get("event_type") == "on_demand":
+        headline, icon = "Live view opened", "live"
+    elif "person" in kinds:
+        headline, icon = "Person at the door", "person"
+    else:
+        headline, icon = "Motion", "motion"
+    history = e.get("status") == "history"
+    if ran:
+        detail = "; ".join(a.get("text") or "" for a in ran)
+    elif history:
+        detail = "recorded at startup"
+    elif kinds or actions:
+        detail = "nothing done"
+    else:
+        detail = ""
+    ps = [a["decision_p"] for a in actions if a.get("decision_p") is not None]
+    if e.get("decision"):
+        label, p = e["decision"], e.get("decision_p") or 0.0
+        if p < min_p:
+            kind = "unsure"  # the "Not sure" pulse fired
+        elif not ran and label in ("nothing", "animal"):
+            kind = "skip"
+        else:
+            kind = "ai"
+        chip = {"kind": kind, "text": f"Decider: {label} {p:.2f}"}
+        if kind == "skip" and detail == "nothing done":
+            detail = "false alarm skipped"
+    elif ps:  # older rows: Decider's p per automation
+        p = max(ps)
+        if fired:
+            kind = "ai" if p >= CHIP_SURE else "unsure"
+        else:
+            kind = "skip" if p < CHIP_NO else "unsure"
+        chip = {"kind": kind, "text": f"Decider {p:.2f}"}
+        if kind == "skip" and detail == "nothing done":
+            detail = "false alarm skipped"
+    elif "doorbell" in kinds:
+        chip = {"kind": "rule", "text": "rule · no AI"}
+    elif fired:
+        chip = {"kind": "rule", "text": "rule"}
+    elif history:
+        chip = {"kind": "skip", "text": "before start"}
+    else:
+        chip = {"kind": "skip", "text": "no action"}
+    return {"headline": headline, "detail": detail, "chip": chip, "icon": icon}
+
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html"), encoding="utf-8") as _f:
+    PAGE = _f.read()  # the dashboard: plain HTML, CSS and JavaScript, edited as a file
+
+
+def make_server(store, tz, port=8080, enqueue=None, devices=None, webhook_secret="", log_bodies=False, status=None, min_p=DEFAULT_MIN_P, live=None):
     class Handler(BaseHTTPRequestHandler):
+        timeout = REQUEST_TIMEOUT
+
+        def _bad_host(self):
+            """True (after answering 403) unless the Host header names this server on loopback. A page on another
+            domain that re-resolves to 127.0.0.1 (DNS rebinding) sends its own name here, and must not reach the API."""
+            port = self.server.server_address[1]
+            if (self.headers.get("Host") or "").lower() in (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"):
+                return False
+            if self.command == "POST":
+                self._drain(self._length())  # so the client gets the 403, not a reset
+            self._send(403, "text/plain", "bad host")
+            return True
+
         def do_POST(self):
-            if self.path != "/webhook" or not on_webhook:
+            if self.path != "/webhook" and self._bad_host():  # webhooks arrive through a public tunnel; the signature guards them
+                return
+            if self.path.startswith("/api/live/"):
+                return self._live_post(self.path[len("/api/live/"):].split("/"))
+            if self.path != "/webhook" or not enqueue:
                 return self._send(404, "text/plain", "not found")
+            if not webhook_secret:
+                return self._refuse(503, "webhook secret not configured")
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                return self._refuse(415, "expected application/json")
+            length = self._length()
+            if length < 0:
+                return self._refuse(400, "bad Content-Length")
+            if length > MAX_WEBHOOK_BYTES:
+                return self._refuse(413, "webhook too large")
+            body = self.rfile.read(length)
+            if not verify_signature(webhook_secret, body, self.headers.get("X-Signature")):
+                return self._refuse(401, "bad signature")
+            if log_bodies:  # opt-in (WEBHOOK_LOG=1): capture Ring's real payload; only verified bodies are printed
+                print(f"webhook body: {body.decode('utf-8', 'replace')}")
             try:
-                on_webhook(json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0))))
-            except (ValueError, KeyError) as e:
-                return self._send(400, "text/plain", f"bad webhook: {e}")
+                payload = json.loads(body)
+                if not isinstance(payload, dict):
+                    raise ValueError("payload is not a JSON object")
+                ev = parse_webhook(payload)
+            except ValueError as e:
+                return self._refuse(400, f"bad webhook: {e}")
+            if ev is not None:  # door event: the worker does the rest; Ring needs a 200 within 5 s
+                enqueue(ev, None)
+            self._send(200, "text/plain", "ok")
+
+        def _drain(self, length):
+            """Read and drop an unread request body before refusing early: closing a socket that still holds
+            request bytes makes the OS reset the connection, and the browser then misses the JSON reply."""
+            if 0 <= length <= MAX_OFFER_BYTES:
+                self.rfile.read(length)
+            else:  # too big or unreadable to drain: answer, then hang up
+                self.close_connection = True
+
+        def _live_post(self, parts):
+            length = self._length()
+            if len(parts) == 3 and parts[0] == "session" and parts[2] == "stop":  # sendBeacon when the page closes
+                self._drain(length)
+                if live:
+                    live.stop(parts[1])
+                return self._send(204, "text/plain", "")
+            if len(parts) != 1 or not parts[0]:
+                self._drain(length)
+                return self._send(404, "text/plain", "not found")
+            if not live:
+                self._drain(length)
+                return self._json(503, {"error": "Live view needs a Ring token"})
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/sdp":  # also blocks cross-site form posts: this type needs CORS, never granted
+                self._drain(length)
+                return self._json(415, {"error": "expected application/sdp"})
+            if length < 0:
+                self.close_connection = True
+                return self._json(400, {"error": "bad Content-Length"})
+            if length > MAX_OFFER_BYTES:
+                self.close_connection = True
+                return self._json(413, {"error": "video offer too large"})
+            try:
+                out = live.start(unquote(parts[0]), self.rfile.read(length).decode(errors="replace"))
+            except LiveError as e:
+                return self._json(e.status, {"error": e.message})
+            self._json(201, out)
+
+        def do_DELETE(self):
+            if self._bad_host():
+                return
+            prefix = "/api/live/session/"
+            session = self.path[len(prefix):] if self.path.startswith(prefix) else ""
+            if not session or "/" in session:
+                return self._send(404, "text/plain", "not found")
+            if live:
+                live.stop(session)
             self._send(204, "text/plain", "")
 
         def do_GET(self):
+            if self._bad_host():
+                return
+            if self.path == "/api/status":
+                return self._send(200, "application/json", json.dumps(status() if status else {}))
+            if self.path == "/api/live":
+                return self._json(200, {"available": bool(live), "cameras": live.cameras() if live else []})
             if self.path == "/api/devices":
                 return self._send(200, "application/json", json.dumps(devices.snapshot() if devices else []))
             items = store.timeline(int(time.time() * 1000) - 86_400_000)
-            acts = store.actions_for([e["id"] for e in items])
+            acts_by_event = store.actions_for([e["id"] for e in items])
             if self.path == "/api/events":
-                self._send(200, "application/json", json.dumps([{**e, "actions": acts.get(e["id"], [])} for e in items]))
+                names = {d["id"]: d["name"] for d in (devices.snapshot() if devices else [])}
+                out = []
+                for e in items:
+                    acts = [{**a, "text": describe_action({**a, "device_name": names.get(a["device"], a["device"])})}
+                            for a in acts_by_event.get(e["id"], [])]
+                    out.append({**e, "actions": acts, "summary": summarize(e, acts, min_p)})
+                self._send(200, "application/json", json.dumps(out))
             elif self.path == "/":
-                block = ('<h2>Home</h2><div id="devices"></div>' if devices else
-                         "<p><small>Devices are on AWS IoT Core: see their state in the IoT console.</small></p>")
-                rows = "".join(row(e, acts.get(e["id"], [])) for e in items) or "<tr><td colspan=4>No events yet.</td></tr>"
-                self._send(200, "text/html; charset=utf-8", PAGE.format(devices_block=block, rows=rows))
+                self._send(200, "text/html; charset=utf-8", PAGE)
             else:
                 self._send(404, "text/plain", "not found")
+
+        def _refuse(self, code, reason):
+            print(f"webhook refused {code}: {reason}")  # never the body: it is not verified yet
+            self._send(code, "text/plain", reason)
+
+        def _json(self, code, obj):
+            self._send(code, "application/json", json.dumps(obj))
+
+        def _length(self):
+            try:
+                return int(self.headers.get("Content-Length") or "")
+            except ValueError:
+                return -1
 
         def _send(self, code, ctype, text):
             self.send_response(code)
@@ -66,21 +222,10 @@ def serve(store, tz, port=8080, on_webhook=None, devices=None):
         def log_message(self, *args):  # keep the poller output readable
             pass
 
-    def row(e, actions):
-        when = datetime.fromtimestamp(e["start_ms"] / 1000, tz).strftime("%I:%M:%S %p")
-        secs = max(0, round((e["end_ms"] - e["start_ms"]) / 1000))
-        kinds = [k for k in (e["kinds"] or "").split(",") if k and k != "activity"]
-        how = "" if not e["kinds"] else (" (emailed)" if e["delivered"] else " (printed only)")
-        label = html.escape(", ".join(kinds)) if kinds else ("activity" if e["kinds"] else "")
-        alert = f'<span class="alert">{label}</span>{how}' if kinds else f"{label}{how}"
-        seen = f"<br><small>{html.escape(e['description'])}</small>" if e.get("description") else ""
-        names = {d["id"]: d["name"] for d in (devices.snapshot() if devices else [])}
-        acts = "".join(
-            f'<br><small class="act">→ {html.escape(describe_action({**a, "device_name": names.get(a["device"], a["device"])}))}</small>'
-            for a in actions)
-        return (f"<tr><td>{when}</td><td>{html.escape(e['device_name'] or '')}</td>"
-                f"<td>{secs} s</td><td>{alert}{seen}{acts}</td></tr>")
+    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+
+def serve(store, tz, port=8080, enqueue=None, devices=None, webhook_secret="", log_bodies=False, status=None, min_p=DEFAULT_MIN_P, live=None):
+    server = make_server(store, tz, port, enqueue, devices, webhook_secret, log_bodies, status, min_p, live)
     print(f"Dashboard: http://127.0.0.1:{port}")
     server.serve_forever()

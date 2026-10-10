@@ -5,7 +5,9 @@ Publishers: LocalPublisher (virtual devices in this process, no AWS),
 IotCorePublisher (AWS IoT Core through the iot-data API, IAM credentials, no device certificates) and
 MqttPublisher (any MQTT broker, e.g. open-source Mosquitto, for testing without AWS).
 """
-import json, threading, time
+import json, re, threading, time
+
+from decider import DEFAULT_MIN_P
 
 
 def load_config(path):
@@ -16,78 +18,96 @@ def load_config(path):
         for step in a["do"]:
             if step["device"] not in ids:
                 raise ValueError(f"automation '{a['name']}' uses unknown device '{step['device']}'")
+        if "doorbell" in a["when"].get("kind", []) and "description_has" in a["when"]:
+            print(f"(automation '{a['name']}': a doorbell press acts before the AI describes the picture, "
+                  f"so description_has never matches a press)")
     return cfg
 
 
-def matches(when, kinds, description, source_name):
-    """All conditions in `when` must hold; each condition is satisfied by any of its values."""
+_NEGATION = re.compile(r"\b(?:no|not|nobody|none|without|never)\b|n't\b")
+
+
+def mentions(description, words):
+    """True when the description names one of the words (whole words; plural -s/-es allowed), ignoring
+    anything after a negation in the same sentence: "no person is visible" does not mention a person."""
+    for sentence in re.split(r"[.;!?]", (description or "").lower()):
+        sentence = _NEGATION.split(sentence, 1)[0]
+        if any(re.search(rf"\b{re.escape(w)}(?:e?s)?\b", sentence) for w in words):
+            return True
+    return False
+
+
+def matches(when, kinds, description, source_name, decision=None, min_p=DEFAULT_MIN_P):
+    """All conditions in `when` must hold; each condition is satisfied by any of its values.
+    `seen` and `unsure` use Decider's answer (`decision`, {"label", "p"}) and never fire for a doorbell press.
+    With an answer, a `seen` automation ignores its `description_has` keywords; without one it falls back to
+    them (and does not fire if it has none), and `unsure` never fires. `no_decision` holds only when there is no
+    answer (Decider off, failed or not asked), so the house is not silent when the AI is down; it never fires for a
+    doorbell press either. `description_has` words match whole words and not after a negation (see `mentions`)."""
     if "kind" in when and not set(when["kind"]) & kinds:
         return False
-    if "description_has" in when:
-        text = (description or "").lower()
-        if not any(word in text for word in when["description_has"]):
-            return False
+    if "time" in when and (when["time"] == "night") != ("night" in kinds):
+        return False
     if "source" in when and source_name not in when["source"]:
         return False
+    if ("seen" in when or when.get("unsure") or when.get("no_decision")) and "doorbell" in kinds:
+        return False
+    if when.get("no_decision") and decision is not None:
+        return False
+    if when.get("unsure"):
+        return decision is not None and decision["p"] < min_p
+    if "seen" in when and decision is not None:
+        return decision["label"] in when["seen"] and decision["p"] >= min_p
+    if "seen" in when and "description_has" not in when:
+        return False
+    if "description_has" in when:
+        if not mentions(description, when["description_has"]):
+            return False
     return True
 
 
 class Bridge:
-    def __init__(self, config, publisher, clock=time.time, decide=None, min_p=0.8):
+    def __init__(self, config, publisher, clock=time.time, min_p=DEFAULT_MIN_P):
         self.config, self.publisher, self.clock = config, publisher, clock
-        self.decide, self.min_p = decide, min_p  # optional DeciderClient; None = keyword matching only
+        self.min_p = min_p  # Decider's top option needs at least this p for a `seen` automation
         self.devices = {d["id"]: d for d in config["devices"]}
-        self.last_fired = {}
+        self.last_fired, self.lock = {}, threading.Lock()  # two worker lanes call plan(): cooldowns stay exact
 
-    def plan(self, kinds, description, source_name, at):
-        """Return (automation, step, decision) triples to run for an event at time `at` (epoch seconds).
-        decision is None, or {"p", "fired"} when Decider answered the automation's `ask` question;
-        unsure automations come back with fired=False. Cooldowns use event time, so a backlog
-        processed at once is not wrongly suppressed."""
-        now, ready = at, []
+    def plan(self, kinds, description, source_name, at, decision=None):
+        """Return (automation, step, decision_p) triples to run for an event at time `at` (epoch seconds).
+        decision is Decider's answer or None; decision_p is its p for automations that used it (`seen` or
+        `unsure`), else None. Cooldowns use event time, so a backlog processed at once is not wrongly suppressed."""
+        with self.lock:
+            return self._plan(kinds, description, source_name, at, decision)
+
+    def _plan(self, kinds, description, source_name, at, decision):
+        out = []
         for a in self.config["automations"]:
             cooldown = a.get("cooldown_s", 0)
             # abs(): events from different cameras can arrive out of time order
-            if cooldown and a["name"] in self.last_fired and abs(now - self.last_fired[a["name"]]) < cooldown:
+            if cooldown and a["name"] in self.last_fired and abs(at - self.last_fired[a["name"]]) < cooldown:
                 continue
-            ready.append(a)
-
-        # Decider replaces `description_has` for automations with an `ask` question; one request per event.
-        asks = {a["name"]: a["when"]["ask"] for a in ready
-                if "ask" in a["when"] and matches(_without_text(a["when"]), kinds, description, source_name)}
-        probs = self.decide(_state(kinds, description, source_name), asks) if self.decide and asks and description else None
-
-        out = []
-        for a in ready:
-            decision = None
-            if probs is not None and a["name"] in probs:
-                p = probs[a["name"]]
-                decision = {"p": round(p, 2), "fired": p >= a["when"].get("min_p", self.min_p)}
-                # Report a skip only if it is news: the keywords would have fired, or Decider was unsure.
-                if not decision["fired"] and p < 0.5 and not matches(a["when"], kinds, description, source_name):
-                    continue
-            elif not matches(a["when"], kinds, description, source_name):
+            if not matches(a["when"], kinds, description, source_name, decision, self.min_p):
                 continue
-            if decision is None or decision["fired"]:  # an unsure answer must not use up the cooldown
-                self.last_fired[a["name"]] = now
-            out += [(a, step, decision) for step in a["do"]]
+            self.last_fired[a["name"]] = at
+            used = decision is not None and ("seen" in a["when"] or a["when"].get("unsure"))
+            out += [(a, step, decision["p"] if used else None) for step in a["do"]]
         return out
 
-    def run(self, ev, kinds, description, source_name):
+    def run(self, ev, kinds, description, source_name, decision=None):
         """Send the commands for one event. Returns a list of result dicts (for the store, email and UI)."""
         results = []
         at = ev["start_ms"] / 1000 if ev.get("start_ms") else self.clock()
-        for automation, step, decision in self.plan(kinds, description, source_name, at):
+        for automation, step, decision_p in self.plan(kinds, description, source_name, at, decision):
             command = {k: v for k, v in step.items() if k != "device"}
             topic = f"porchlink/{step['device']}/set"
             base = {"automation": automation["name"], "device": step["device"],
                     "device_name": self.devices[step["device"]]["name"], "command": command, "topic": topic,
-                    "decision_p": decision and decision["p"]}
-            if decision and not decision["fired"]:
-                results.append({**base, "ok": True, "error": None, "skipped": True})
-                continue
+                    "decision_p": decision_p}
             payload = {**command, "automation": automation["name"], "event_id": ev["id"],
                        "source": source_name, "sent_at": int(self.clock() * 1000)}
+            if automation.get("label"):
+                payload["label"] = automation["label"]  # what the dashboard tile says ("Doorbell!", "Package")
             try:
                 self.publisher.publish(topic, payload)
                 ok, error = True, None
@@ -96,15 +116,6 @@ class Bridge:
                 print(f"(action failed: {topic}: {error})")
             results.append({**base, "ok": ok, "error": error, "skipped": False})
         return results
-
-
-def _without_text(when):
-    return {k: v for k, v in when.items() if k not in ("description_has", "ask", "min_p")}
-
-
-def _state(kinds, description, source_name):
-    return (f"A home doorbell camera named '{source_name}' recorded an event ({', '.join(sorted(kinds)) or 'motion'}). "
-            f"An AI description of the camera frame says: {description}")
 
 
 def describe_action(r):
@@ -118,6 +129,8 @@ def describe_action(r):
         what = f"ON for {d // 60} min" if d >= 60 else f"ON for {d} s"
     elif c["action"] == "flash":
         what = f"flash x{c.get('times', 1)}"
+    elif c["action"] == "pulse":
+        what = "gentle pulse"
     else:
         what = c["action"].upper()
     return f"{r['device_name']} {what} ({r['automation']}){sure}" + ("" if r["ok"] else " - FAILED")
@@ -129,7 +142,7 @@ class VirtualDevices:
     def __init__(self, config, clock=time.time):
         self.clock, self.lock = clock, threading.Lock()
         self.state = {d["id"]: {"id": d["id"], "name": d["name"], "type": d["type"], "on_until": 0,
-                                "flash_until": 0, "last": None} for d in config["devices"]}
+                                "flash_until": 0, "pulse_until": 0, "last": None} for d in config["devices"]}
 
     def apply(self, device_id, cmd):
         now = self.clock()
@@ -141,12 +154,14 @@ class VirtualDevices:
                 s["on_until"] = 0
             elif cmd["action"] == "flash":
                 s["flash_until"] = now + 1.0 * cmd.get("times", 1)  # one flash per second
-            s["last"] = {"automation": cmd.get("automation"), "at": int(now * 1000)}
+            elif cmd["action"] == "pulse":
+                s["pulse_until"] = now + cmd.get("duration_s", 10)  # a soft, slow glow: "the AI is not sure"
+            s["last"] = {"automation": cmd.get("automation"), "label": cmd.get("label"), "at": int(now * 1000)}
 
     def snapshot(self):
         now = self.clock()
         with self.lock:
-            return [{**s, "on": s["on_until"] > now, "flashing": s["flash_until"] > now,
+            return [{**s, "on": s["on_until"] > now, "flashing": s["flash_until"] > now, "pulsing": s["pulse_until"] > now,
                      "seconds_left": max(0, int(s["on_until"] - now))} for s in self.state.values()]
 
 

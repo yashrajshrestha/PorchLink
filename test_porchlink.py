@@ -1,14 +1,15 @@
 """Tests for rules and the poll -> store -> alert flow. Run: python3 -m unittest -v"""
-import unittest
+import ssl, unittest
 from datetime import datetime
 from unittest import mock
 from zoneinfo import ZoneInfo
 
 import app
 from alerts import EmailAlerter
-from ring_client import FakeRing, parse_event
+from ring_client import FakeRing, TokenExpired, parse_event
 from rules import Settings, evaluate, format_alert, is_night
 from store import Store
+from worker import EventWorker
 
 TZ = ZoneInfo("Asia/Kathmandu")
 
@@ -78,27 +79,30 @@ class RulesTest(unittest.TestCase):
 class FlowTest(unittest.TestCase):
     def setUp(self):
         self.store, self.alerter = Store(":memory:"), CaptureAlerter()
+        self.worker = EventWorker(self.store, app.make_process(self.store, self.alerter, Settings(), TZ))
+
+    def poll(self, ring, **kw):
+        return app.poll_once(ring, self.store, self.worker.handle, **kw)  # handle = synchronous submit
 
     def test_startup_poll_records_without_alerting_then_new_event_alerts(self):
         ring = FakeRing(every=1)
-        self.assertEqual(app.poll_once(ring, self.store, self.alerter, Settings(), TZ, alert_new=False), 1)
+        self.assertEqual(self.poll(ring, alert_new=False), 1)
         self.assertEqual(self.alerter.sent, [])
-        self.assertEqual(app.poll_once(ring, self.store, self.alerter, Settings(), TZ), 1)
+        self.assertEqual(self.poll(ring), 1)
         self.assertEqual(len(self.alerter.sent), 1)
 
     def test_same_event_is_not_alerted_twice(self):
         ring = FakeRing(every=2)  # second poll adds one event, third poll returns it again
         for _ in range(3):
-            app.poll_once(ring, self.store, self.alerter, Settings(), TZ)
+            self.poll(ring)
         self.assertEqual(len(self.alerter.sent), 1)
 
     def test_burst_through_store(self):
         s = Settings(burst_count=3, burst_minutes=30)
+        worker = EventWorker(self.store, app.make_process(self.store, self.alerter, s, TZ))
         kinds = []
         for i, m in enumerate((0, 5, 10, 15)):
-            ev = event(f"e{i}", ms(2026, 10, 5, 14, m))
-            self.store.add_event(ev, "Front Door")
-            app.handle_event(ev, "Front Door", self.store, self.alerter, s, TZ)
+            worker.handle({**event(f"e{i}", ms(2026, 10, 5, 14, m)), "source": "poll"}, "Front Door")
             kinds.append(self.alerter.sent[-1][0])
         self.assertTrue(kinds[2].startswith("PorchLink: Unusual activity"))   # 3rd event: burst
         self.assertTrue(kinds[3].startswith("PorchLink: Activity"))           # 4th: no repeat burst
@@ -109,6 +113,198 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(parse_event(raw, "dev1")["end_ms"] - parse_event(raw, "dev1")["start_ms"], 20208)
 
 
+class PollIsolationTest(unittest.TestCase):
+    class TwoDoors:
+        def __init__(self, failure):
+            self.failure = failure
+
+        def devices(self):
+            return [{"id": "a", "attributes": {"name": "A"}}, {"id": "b", "attributes": {"name": "B"}}]
+
+        def events(self, device_id):
+            if device_id == "a":
+                raise self.failure
+            return [{"type": "history-events", "id": "b-1",
+                     "attributes": {"start": 1000, "end": 2000, "event_type": "motion_detected"}}]
+
+    def test_one_failing_device_does_not_stop_the_others(self):
+        submitted = []
+        with mock.patch("builtins.print"):
+            n = app.poll_once(self.TwoDoors(RuntimeError("Ring API 500")), Store(":memory:"),
+                              lambda ev, name: submitted.append((ev["id"], name)))
+        self.assertEqual((n, submitted), (1, [("b-1", "B")]))
+
+    class OneBadItem:
+        """Device a returns one malformed item (no id) and one good one; device b returns a good one."""
+        def devices(self):
+            return [{"id": "a", "attributes": {"name": "A"}}, {"id": "b", "attributes": {"name": "B"}}]
+
+        def events(self, device_id):
+            def raw(eid, start):
+                return {"type": "history-events", "id": eid,
+                        "attributes": {"start": start, "end": start + 1, "event_type": "motion_detected"}}
+            if device_id == "a":
+                return [{"type": "history-events", "attributes": {"start": 1000, "end": 1001}}, raw("a-1", 2000)]
+            return [raw("b-1", 3000)]
+
+    def test_malformed_item_does_not_hide_the_rest(self):
+        submitted = []
+        with mock.patch("builtins.print") as out:
+            app.poll_once(self.OneBadItem(), Store(":memory:"), lambda ev, name: submitted.append((ev["id"], name)))
+        self.assertEqual(submitted, [("a-1", "A"), ("b-1", "B")])
+        self.assertTrue(any(str(c.args[0]).startswith("bad event from A: ") for c in out.call_args_list))
+
+    def test_parse_error_that_is_an_expired_token_still_propagates(self):
+        with mock.patch("app.parse_event", side_effect=TokenExpired("expired")), self.assertRaises(TokenExpired):
+            app.poll_once(self.OneBadItem(), Store(":memory:"), lambda ev, name: None)
+
+    def test_expired_token_still_stops_polling(self):
+        with self.assertRaises(TokenExpired):
+            app.poll_once(self.TwoDoors(TokenExpired("expired")), Store(":memory:"), lambda ev, name: None)
+
+    class Flaky:
+        """Device a fails on its first events() call and succeeds afterwards; b always works (and grows)."""
+        def __init__(self):
+            self.a_calls, self.b_events = 0, [1000]
+
+        def devices(self):
+            return [{"id": "a", "attributes": {"name": "A"}}, {"id": "b", "attributes": {"name": "B"}}]
+
+        def events(self, device_id):
+            def raw(eid, start):
+                return {"type": "history-events", "id": eid,
+                        "attributes": {"start": start, "end": start + 1, "event_type": "motion_detected"}}
+            if device_id == "a":
+                self.a_calls += 1
+                if self.a_calls == 1:
+                    raise RuntimeError("Ring API 500")
+                return [raw("a-1", 1000), raw("a-2", 2000)]
+            return [raw(f"b-{s}", s) for s in self.b_events]
+
+    def test_device_failing_on_first_poll_is_seeded_later_not_alerted(self):
+        ring, store, submitted, seeded = self.Flaky(), Store(":memory:"), [], set()
+        submit = lambda ev, name: submitted.append(ev["id"])
+        with mock.patch("builtins.print"):
+            app.poll_once(ring, store, submit, seeded=seeded)
+            self.assertEqual((submitted, seeded, store.status("b-1000")), ([], {"b"}, "history"))
+            ring.b_events.append(3000)  # b gets a new event while a is still unseeded
+            app.poll_once(ring, store, submit, seeded=seeded)
+        self.assertEqual(submitted, ["b-3000"])  # a's old history is recorded, never submitted
+        self.assertEqual((store.status("a-1"), store.status("a-2")), ("history", "history"))
+        self.assertEqual(seeded, {"a", "b"})
+
+    def test_device_names_cache_and_fallback(self):
+        ring = self.TwoDoors(None)
+        names = app.DeviceNames(ring)
+        self.assertEqual(names({"device_id": "b"}), "B")
+
+        class Down:
+            def devices(self):
+                raise RuntimeError("Ring API 500")
+
+        with mock.patch("builtins.print"):
+            self.assertEqual(app.DeviceNames(Down())({"device_id": "ava1.ring.device.ABC123"}),
+                             "Ring device ...ABC123")
+
+
+class RetryAgeTest(unittest.TestCase):
+    NOW_MS = 1_800_000_000_000
+
+    class One:
+        def __init__(self, start):
+            self.start = start
+
+        def devices(self):
+            return [{"id": "a", "attributes": {"name": "A"}}]
+
+        def events(self, device_id):
+            return [{"type": "history-events", "id": "a-1",
+                     "attributes": {"start": self.start, "end": self.start + 1, "event_type": "motion_detected"}}]
+
+    def poll(self, status, age_ms):
+        store, submitted = Store(":memory:"), []
+        if status:
+            store.begin({"id": "a-1", "device_id": "a", "start_ms": self.NOW_MS - age_ms, "end_ms": 0,
+                         "event_type": "motion_detected", "sub_type": None, "source": "poll"}, "A", 3)
+            store.finish("a-1", status)
+        with mock.patch("app.time.time", return_value=self.NOW_MS / 1000):
+            app.poll_once(self.One(self.NOW_MS - age_ms), store, lambda ev, name: submitted.append(ev["id"]))
+        return submitted
+
+    def test_stale_failed_event_is_not_retried_but_a_recent_one_is(self):
+        self.assertEqual(self.poll("failed", 20 * 60_000), [])
+        self.assertEqual(self.poll("failed", 60_000), ["a-1"])
+
+    def test_stale_new_event_is_still_submitted(self):
+        self.assertEqual(self.poll(None, 20 * 60_000), ["a-1"])
+
+
+class BurstAcrossLanesTest(unittest.TestCase):
+    """Doorbell presses and motion run in parallel lanes; a busy door still gets one burst alert per window."""
+
+    def test_one_burst_alert_when_a_press_lands_while_motion_is_described(self):
+        import threading
+        store, gate, describing = Store(":memory:"), threading.Event(), threading.Event()
+
+        class Alerter:
+            def send(self, subject, body):
+                return True
+
+        def describe(e):
+            if e["id"] == "m3":  # the AI is still looking at the motion event that makes the burst
+                describing.set()
+                gate.wait(5)
+            return None
+
+        worker = EventWorker(store, app.make_process(store, Alerter(), Settings(), TZ, describe=describe),
+                             lanes=("doorbell", "main"),
+                             lane_for=lambda e: "doorbell" if e["event_type"] == "button_press" else "main").start()
+
+        def event(eid, minute, kind="motion_detected"):
+            start = ms(2026, 10, 9, 14, minute)
+            return {"id": eid, "device_id": "d1", "start_ms": start, "end_ms": start + 5000, "event_type": kind,
+                    "sub_type": None, "source": "poll"}
+
+        for eid, minute in (("m1", 0), ("m2", 1)):
+            worker.submit(event(eid, minute), "Front Door")
+        self.assertTrue(worker.drain(5))
+        worker.submit(event("m3", 2), "Front Door")
+        self.assertTrue(describing.wait(5))
+        worker.submit(event("p1", 3, "button_press"), "Front Door")
+        for _ in range(200):  # the press finishes in its own lane while m3 is still blocked
+            if store.status("p1") == "done":
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(store.status("p1"), "done")
+        gate.set()
+        self.assertTrue(worker.drain(5))
+        bursts = [r[0] for r in store.db.execute("SELECT event_id FROM alerts WHERE kind='burst'")]
+        self.assertEqual(bursts, ["m3"])
+        delivered = {r[0]: r[1] for r in store.db.execute("SELECT event_id, MIN(delivered) FROM alerts GROUP BY event_id")}
+        self.assertEqual(delivered, {"m1": 1, "m2": 1, "m3": 1, "p1": 1})
+
+    def test_a_retry_replaces_its_earlier_alert_claim(self):
+        store = Store(":memory:")
+        start = ms(2026, 10, 9, 14, 0)
+        e = {"id": "e1", "device_id": "d1", "start_ms": start, "end_ms": start, "event_type": "button_press",
+             "sub_type": None, "source": "poll"}
+
+        class Failing:
+            def send(self, subject, body):
+                raise ConnectionError("smtp down")
+
+        class Ok:
+            def send(self, subject, body):
+                return True
+
+        store.begin(e, "Front Door")
+        with self.assertRaises(ConnectionError):
+            app.handle_event(e, "Front Door", store, Failing(), Settings(), TZ)
+        app.handle_event(e, "Front Door", store, Ok(), Settings(), TZ)
+        rows = store.db.execute("SELECT kind, delivered FROM alerts WHERE event_id='e1'").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [("doorbell", 1)])
+
+
 class EmailTest(unittest.TestCase):
     ENV = {"SMTP_HOST": "smtp.example.com", "SMTP_USER": "me@example.com", "SMTP_PASSWORD": "x", "ALERT_TO": "care@example.com"}
 
@@ -117,6 +313,10 @@ class EmailTest(unittest.TestCase):
             self.assertTrue(EmailAlerter(self.ENV).send("subj", "body"))
         server = smtp.return_value.__enter__.return_value
         server.starttls.assert_called_once()
+        context = server.starttls.call_args.kwargs["context"]  # certificate checked: no MITM on the SMTP password
+        self.assertIsInstance(context, ssl.SSLContext)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
         server.login.assert_called_once_with("me@example.com", "x")
         msg = server.send_message.call_args[0][0]
         self.assertEqual((msg["To"], msg["Subject"]), ("care@example.com", "subj"))

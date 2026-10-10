@@ -6,31 +6,51 @@
     {"id": "floodlight",        "name": "Driveway floodlight", "type": "light"}
   ],
   "automations": [
-    {"name": "Night path light",
-     "why": "Light the way so nobody walks to the door in the dark.",
-     "when": {"kind": ["night"]},
-     "do": [{"device": "hallway-light", "action": "on", "duration_s": 300}]},
-
     {"name": "Visual doorbell",
      "why": "Flash the lights for people who cannot hear the bell.",
+     "label": "Doorbell!",
      "when": {"kind": ["doorbell"]},
      "do": [{"device": "living-room-light", "action": "flash", "times": 3}]},
 
     {"name": "Package porch light",
      "why": "Make a delivered package easy to see and hard to take unnoticed.",
-     "when": {"description_has": ["package", "box", "parcel"],
-              "ask": {"question": "Is a delivered package, box or parcel visible at the door?",
-                      "yes": "a package, parcel or shipping box is at the door",
-                      "no": "no package: only people, signs, food, vehicles or an empty porch"}},
+     "label": "Package",
+     "when": {"seen": ["package"], "description_has": ["package", "box", "parcel"]},
      "do": [{"device": "porch-light", "action": "on", "duration_s": 600}],
      "cooldown_s": 600},
 
+    {"name": "Visitor at night",
+     "why": "Someone is outside in the dark: make sure the whole house notices.",
+     "label": "Someone outside",
+     "when": {"seen": ["person"], "time": "night", "description_has": ["person", "people", "man", "men", "woman", "women", "courier"]},
+     "do": [{"device": "hallway-light", "action": "flash", "times": 3},
+            {"device": "living-room-light", "action": "flash", "times": 3},
+            {"device": "porch-light", "action": "flash", "times": 3}],
+     "cooldown_s": 60},
+
+    {"name": "Visitor by day",
+     "why": "Someone is at the door: a gentle signal, not an alarm.",
+     "label": "Visitor",
+     "when": {"seen": ["person"], "time": "day"},
+     "do": [{"device": "living-room-light", "action": "pulse", "duration_s": 10}],
+     "cooldown_s": 60},
+
     {"name": "Night vehicle floodlight",
      "why": "Light up the driveway when a car arrives at night.",
-     "when": {"kind": ["night"], "description_has": ["car", "vehicle", "truck", "van"],
-              "ask": {"question": "Is a car, truck or other vehicle visible in the driveway?",
-                      "yes": "a car, truck, van or other vehicle is in the driveway",
-                      "no": "no vehicle: only people, packages, animals or an empty driveway"}},
-     "do": [{"device": "floodlight", "action": "on", "duration_s": 180}]}
+     "label": "Car arriving",
+     "when": {"seen": ["vehicle"], "time": "night", "description_has": ["car", "vehicle", "truck", "van"]},
+     "do": [{"device": "floodlight", "action": "on", "duration_s": 180}]},
+
+    {"name": "Night light (AI off)",
+     "why": "Without an AI answer the house cannot tell a cat from a visitor, so light the hallway for any night motion.",
+     "label": "Night motion",
+     "when": {"kind": ["night"], "no_decision": true},
+     "do": [{"device": "hallway-light", "action": "on", "duration_s": 300}]},
+
+    {"name": "Not sure",
+     "why": "The AI could not tell what is outside: a gentle pulse says 'check the camera'.",
+     "label": "Not sure",
+     "when": {"unsure": true},
+     "do": [{"device": "living-room-light", "action": "pulse", "duration_s": 10}]}
   ]
 }

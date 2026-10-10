@@ -1,0 +1,206 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>PorchLink</title>
+<style>
+:root{--bg:#0e1116;--card:#171b22;--line:#262c36;--text:#e8e6e1;--muted:#9aa3b2;--amber:#ffc24d;--glow:255,176,32}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:28px 24px 48px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+.brand{font-size:26px;font-weight:800;letter-spacing:-.01em}.brand span{color:var(--amber)}
+.status{display:flex;gap:10px;align-items:center;font-size:14px;color:var(--muted)}
+.dot{width:10px;height:10px;border-radius:50%;background:#6b7280}
+.dot.ok{background:#34d399;box-shadow:0 0 8px #34d399}.dot.bad{background:#f87171;box-shadow:0 0 8px #f87171}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:20px;min-height:168px;transition:background .3s,border-color .3s}
+.bulb{width:48px;height:64px;margin-bottom:16px}
+.bulb svg{display:block;width:100%;height:100%;overflow:visible}
+.bulb .glass{fill:#232833;stroke:#3a4250;stroke-width:2}
+.bulb .filament{fill:none;stroke:#4a5260;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.bulb .shine{fill:rgba(255,255,255,.06)}
+.bulb .base{fill:#3a4250}
+.room{font-size:14px;color:var(--muted);font-weight:600}
+.state{font-size:24px;font-weight:800;margin-top:2px}
+.why{font-size:13px;color:var(--muted);margin-top:4px;min-height:1.2em}
+.tile.on{border-color:#5a4416;background:linear-gradient(180deg,#241d0f,var(--card) 70%)}
+.tile.on .glass,.tile.flash .glass{fill:#ffc24d;stroke:#ffb020}
+.tile.on .filament,.tile.flash .filament{stroke:#fff4c2}
+.tile.on .shine,.tile.flash .shine{fill:rgba(255,255,255,.55)}
+.tile.on .base,.tile.flash .base{fill:#8a7a5c}
+.tile.on .bulb{animation:breathe 2.4s ease-in-out infinite}
+.tile.flash{border-color:#6b4f12;background:linear-gradient(180deg,#2a210f,var(--card) 70%)}
+.tile.flash .bulb{animation:flash .6s steps(1) infinite}
+.tile.pulse .glass{fill:#ffd98a;stroke:#c99a3a}.tile.pulse .filament{stroke:#fff8de}
+.tile.pulse .shine{fill:rgba(255,255,255,.45)}.tile.pulse .base{fill:#7d7158}
+.tile.pulse .bulb{animation:pulse 2.6s ease-in-out infinite}
+.tile.on .state,.tile.flash .state{color:var(--amber)}.tile.pulse .state{color:#f3d58c}
+@keyframes breathe{0%,100%{filter:drop-shadow(0 0 8px rgba(var(--glow),.55))}50%{filter:drop-shadow(0 0 22px rgba(var(--glow),.95))}}
+@keyframes flash{0%,49%{opacity:1;filter:drop-shadow(0 0 16px rgba(var(--glow),.9))}50%,100%{opacity:.2;filter:none}}
+@keyframes pulse{0%,100%{filter:drop-shadow(0 0 0 rgba(255,214,120,0));opacity:.55}50%{filter:drop-shadow(0 0 14px rgba(255,214,120,.7));opacity:1}}
+@media (prefers-reduced-motion:reduce){.tile .bulb{animation:none!important}.tile.on .bulb,.tile.flash .bulb{filter:drop-shadow(0 0 12px rgba(var(--glow),.95))}}
+.legend{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:18px}
+.legend[hidden]{display:none}
+.legend i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:7px;vertical-align:-1px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:30px 0 12px;font-weight:700}
+.ev{display:flex;gap:14px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 14px;margin-bottom:9px}
+.icon{width:52px;height:52px;border-radius:12px;flex:none;display:grid;place-items:center;font-size:26px;background:#20252e}
+.ev b{font-size:16px}.meta{font-size:13px;color:var(--muted)}
+.chip{font-size:12px;font-weight:700;border-radius:999px;padding:4px 11px;white-space:nowrap}
+.chip.rule{background:#3a2a0b;color:#ffc24d}.chip.ai{background:#14233d;color:#8db4ff}
+.chip.skip{background:#1f242d;color:#9aa3b2}.chip.unsure{background:#33290f;color:#f3d58c}
+.grid .note{grid-column:1/-1}
+.empty,.note{color:var(--muted);background:var(--card);border:1px dashed var(--line);border-radius:16px;padding:18px;text-align:center}
+button{font:inherit;cursor:pointer}
+.right{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.watch{background:var(--amber);color:#1b1404;border:0;border-radius:999px;padding:8px 16px;font-weight:800;white-space:nowrap}
+.watch:disabled{background:#2a2f39;color:var(--muted);cursor:not-allowed}
+.watch.small{padding:4px 11px;font-size:12px}
+.acts{margin-left:auto;display:flex;gap:8px;align-items:center}
+.live{background:var(--card);border:1px solid #5a4416;border-radius:20px;padding:14px;margin-bottom:22px}
+.live[hidden]{display:none}
+.live-head,.live-foot{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.live-head b{font-size:17px}.live-foot{margin-top:10px;color:var(--muted);font-size:14px}
+.live video{display:block;width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;margin-top:10px;object-fit:contain}
+.stop{background:#2a2f39;color:var(--text);border:1px solid var(--line);border-radius:999px;padding:6px 14px;font-weight:700}
+@media (max-width:560px){main{padding:18px 14px}.ev{flex-wrap:wrap}.acts{margin-left:66px}}
+</style></head><body><main>
+<div class="top"><div class="brand">Porch<span>Link</span></div>
+<div class="right"><button class="watch" id="watch-live" disabled title="Live view needs a Ring token">▶ Watch live</button>
+<div class="status"><span class="dot" id="dot"></span><span id="status-text">Connecting…</span></div></div></div>
+<section class="live" id="live" hidden aria-label="Live camera">
+<div class="live-head"><b id="live-title">Live</b><button class="stop" id="live-stop">Stop</button></div>
+<video id="live-video" autoplay muted playsinline></video>
+<div class="live-foot"><span><span id="live-status" role="status">Connecting…</span><span id="live-time"></span></span><button class="watch" id="live-again" hidden>Keep watching</button></div>
+</section>
+<div class="grid" id="tiles"></div>
+<div class="legend" id="legend"><span><i style="background:#ffbf3a"></i>On (steady glow)</span>
+<span><i style="background:#ffbf3a;opacity:.5"></i>Flashing = doorbell or alert</span>
+<span><i style="background:#ffd98a"></i>Gentle pulse = AI not sure</span><span><i style="background:#2f3643"></i>Off</span></div>
+<h2>Door events · last 24 hours</h2>
+<div id="events"><div class="empty">No events yet.</div></div>
+</main><script>
+const BULB='<svg viewBox="0 0 48 64" aria-hidden="true"><path class="glass" d="M24 3C13.5 3 6 11 6 21.5c0 6.8 3.5 11.2 6.7 15 2.5 3 4.3 5.5 4.3 9h14c0-3.5 1.8-6 4.3-9 3.2-3.8 6.7-8.2 6.7-15C42 11 34.5 3 24 3z"/>'+
+  '<path class="filament" d="M19 31l2.5 4 2.5-4 2.5 4 2.5-4M21.5 35v10M26.5 35v10"/><ellipse class="shine" cx="16.5" cy="15.5" rx="3.5" ry="6" transform="rotate(25 16.5 15.5)"/>'+
+  '<rect class="base" x="16" y="47.5" width="16" height="4.5" rx="2"/><rect class="base" x="16.5" y="53.5" width="15" height="4.5" rx="2"/><path class="base" d="M20 59.5h8l-1.6 3h-4.8z"/></svg>';
+const ICON={doorbell:"🔔",package:"📦",vehicle:"🚗",person:"🧍",animal:"🐾",motion:"👣",live:"📹"};
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const clock=ms=>new Date(ms).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});
+const tilesEl=document.getElementById("tiles"),eventsEl=document.getElementById("events");
+let lastEvents="";
+function view(d){
+  const label=d.last&&d.last.label, s=d.seconds_left;
+  if(d.flashing)return{cls:"flash",state:label||"Alert!",why:"flashing · just now"};
+  if(d.pulsing)return{cls:"pulse",state:label||"Not sure",why:"gentle pulse · check camera"};
+  if(d.on)return{cls:"on",state:label||"On",why:"amber · "+(s>=60?Math.ceil(s/60)+" min left":s+" s left")};
+  return{cls:"",state:"Off",why:""};
+}
+function setText(el,sel,text){const n=el.querySelector(sel);if(n.textContent!==text)n.textContent=text;}
+function renderTiles(ds){
+  if(!ds.length){tilesEl.innerHTML='<div class="note">Lights are on AWS IoT Core: see their state in the IoT console</div>';return;}
+  const note=tilesEl.querySelector(".note");if(note)note.remove();
+  for(const d of ds){
+    let el=tilesEl.querySelector('[data-id="'+CSS.escape(d.id)+'"]');
+    if(!el){el=document.createElement("div");el.dataset.id=d.id;el.dataset.testid="tile-"+d.id;
+      el.innerHTML='<div class="bulb">'+BULB+'</div><div class="room"></div><div class="state"></div><div class="why"></div>';tilesEl.appendChild(el);}
+    const v=view(d),cls=("tile "+v.cls).trim();
+    if(el.className!==cls)el.className=cls;  // only the class changes, so the bulb's animation keeps running
+    setText(el,".room",d.name);setText(el,".state",v.state);setText(el,".why",v.why);
+  }
+}
+function eventRow(e){
+  const s=e.summary,meta=[e.device_name||"",clock(e.start_ms),s.detail].filter(Boolean).map(esc).join(" · ");
+  const watch=cameras[e.device_id]?'<button class="watch small" data-watch="'+esc(e.device_id)+'" aria-label="Watch '+esc(cameras[e.device_id])+' live">▶ Watch</button>':"";
+  return '<div class="ev" data-testid="event"><div class="icon" aria-hidden="true">'+(ICON[s.icon]||ICON.motion)+
+    '</div><div><b>'+esc(s.headline)+'</b><div class="meta">'+meta+'</div></div><div class="acts">'+watch+
+    '<span class="chip '+esc(s.chip.kind)+'">'+esc(s.chip.text)+'</span></div></div>';
+}
+function renderStatus(st){
+  document.getElementById("dot").className="dot "+(st.ring_ok===false?"bad":st.ring_ok?"ok":"");
+  const ring=st.ring_ok===false?"Ring not reachable":st.ring_ok?"Ring connected":(st.mode||"Starting");
+  const when=st.day&&st.time?st.day+" "+st.time:"",phase=st.night==null?"":(st.night?"Night":"Day");
+  document.getElementById("status-text").textContent=[ring,when,phase].filter(Boolean).join(" · ");
+}
+async function tick(){
+  try{
+    const [ds,evs,st]=await Promise.all(["/api/devices","/api/events","/api/status"].map(u=>fetch(u).then(r=>r.json())));
+    renderTiles(ds);document.getElementById("legend").hidden=!ds.length;
+    const key=JSON.stringify(evs);
+    newestCamera=evs.length?evs[0].device_id:null;
+    if(key!==lastEvents){eventsEl.innerHTML=evs.length?evs.map(eventRow).join(""):'<div class="empty">No events yet.</div>';lastEvents=key;}
+    renderStatus(st);
+  }catch(err){
+    document.getElementById("dot").className="dot bad";
+    document.getElementById("status-text").textContent="Dashboard lost connection to PorchLink";
+  }
+}
+// Watch live: the browser makes the WebRTC offer; PorchLink forwards it to Ring with the token (see live.py).
+const $=id=>document.getElementById(id);
+let cameras=Object.create(null),newestCamera=null,pc=null,session=null,countdown=null,currentCam=null;
+async function loadLive(){
+  let r={available:false,cameras:[]};
+  try{r=await (await fetch("/api/live")).json();}catch(err){}
+  const next=Object.create(null);for(const c of (r.cameras||[]))next[c.id]=c.name;
+  const changed=Object.keys(next).sort().join("\n")!==Object.keys(cameras).sort().join("\n");
+  cameras=next;
+  const b=$("watch-live");b.disabled=!r.available||!Object.keys(cameras).length;
+  b.title=b.disabled?"Live view needs a Ring token":"";
+  if(changed)lastEvents="";  // re-render rows so their ▶ Watch buttons match the camera list; not on every refresh, it would steal focus
+}
+const say=text=>{$("live-status").textContent=text;$("live-time").textContent="";};  // the status is the live region: only state changes go here
+const closeOnRing=s=>fetch("/api/live/session/"+encodeURIComponent(s),{method:"DELETE"}).catch(()=>{});
+function stopLive(reason){
+  clearInterval(countdown);countdown=null;
+  $("live-time").textContent="";
+  if(pc){pc.close();pc=null;}
+  $("live-video").srcObject=null;
+  if(session){closeOnRing(session);session=null;}
+  if(reason)say(reason);
+}
+function startCountdown(secs){
+  const end=Date.now()+secs*1000;
+  const show=()=>{
+    const left=Math.max(0,Math.round((end-Date.now())/1000));
+    if(!left){stopLive("Stopped after "+Math.round(secs/60)+" minutes");$("live-again").hidden=false;return;}
+    $("live-time").textContent=" · "+Math.floor(left/60)+":"+String(left%60).padStart(2,"0")+" left";  // ticks every second: no live role
+  };
+  say("Live");show();countdown=setInterval(show,1000);
+}
+function watchForVideo(mine){
+  const v=$("live-video"),t=setTimeout(()=>{if(pc===mine&&!v.videoWidth)stopLive("Couldn't connect to the camera");},15000);
+  v.addEventListener("playing",()=>clearTimeout(t),{once:true});
+  mine.addEventListener("connectionstatechange",()=>{if(pc===mine&&mine.connectionState==="failed")stopLive("Couldn't connect to the camera");});
+}
+async function watch(cam){
+  if(!cam)return;
+  stopLive();
+  currentCam=cam;$("live").hidden=false;$("live-again").hidden=true;
+  $("live-title").textContent=(cameras[cam]||"Camera")+" · LIVE";say("Connecting…");
+  const mine=pc=new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+  try{
+    mine.addTransceiver("video",{direction:"recvonly"});mine.addTransceiver("audio",{direction:"recvonly"});
+    mine.ontrack=e=>{if(e.track.kind==="video")$("live-video").srcObject=e.streams[0]||new MediaStream([e.track]);};
+    await mine.setLocalDescription(await mine.createOffer());
+    await new Promise(done=>{  // Ring wants every ICE candidate in the offer
+      if(mine.iceGatheringState==="complete")return done();
+      const t=setTimeout(done,3000);
+      mine.addEventListener("icegatheringstatechange",()=>{if(mine.iceGatheringState==="complete"){clearTimeout(t);done();}});
+    });
+    if(pc!==mine)return;  // stopped while gathering
+    const r=await fetch("/api/live/"+encodeURIComponent(cam),{method:"POST",headers:{"Content-Type":"application/sdp"},body:mine.localDescription.sdp});
+    const out=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(out.error||"Live view failed");
+    if(pc!==mine){closeOnRing(out.session);return;}
+    session=out.session;
+    await mine.setRemoteDescription({type:"answer",sdp:out.answer});
+    if(pc!==mine)return;  // stopped while connecting
+    startCountdown(out.expires_in);watchForVideo(mine);
+  }catch(err){if(pc===mine)stopLive(err.message||"Couldn't connect to the camera");}
+}
+$("watch-live").onclick=()=>watch(cameras[newestCamera]?newestCamera:Object.keys(cameras)[0]);
+$("live-stop").onclick=()=>{stopLive();$("live").hidden=true;};
+$("live-again").onclick=()=>watch(currentCam);
+eventsEl.addEventListener("click",e=>{const b=e.target.closest("[data-watch]");if(b)watch(b.dataset.watch);});
+addEventListener("keydown",e=>{if(e.key==="Escape"&&!$("live").hidden){stopLive();$("live").hidden=true;}});
+addEventListener("pagehide",()=>{if(session)navigator.sendBeacon("/api/live/session/"+encodeURIComponent(session)+"/stop");});
+tick();setInterval(tick,1000);
+loadLive();setInterval(loadLive,30000);  // separate: the lights never wait on the camera list
+</script></body></html>

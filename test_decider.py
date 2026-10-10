@@ -1,7 +1,7 @@
 """Tests for the Strands Decider HTTP client (no server needed). Run: python3 -m unittest test_decider -v"""
-import io, json, unittest
+import io, json, threading, time, unittest
 
-from decider import DeciderClient
+from decider import DEFAULT_MIN_P, SEEN_OPTIONS, SEEN_QUESTION, DeciderClient, state_text
 
 
 class FakeOpener:
@@ -15,21 +15,65 @@ class FakeOpener:
         return io.BytesIO(json.dumps(self.reply).encode())
 
 
-class DeciderClientTest(unittest.TestCase):
-    def test_sends_one_choice_question_per_name_and_reads_p_yes(self):
-        opener = FakeOpener({"answers": {"pkg": {"type": "choice", "choice": "yes", "confidence": 0.9,
-                                                 "probabilities": {"yes": 0.9, "no": 0.1}}}})
-        p = DeciderClient({"DECIDER_URL": "http://box:9000/"}, opener)("state text", {"pkg": {"question": "Is there a package?", "yes": "a box"}})
-        self.assertEqual(p, {"pkg": 0.9})
+class ChooseTest(unittest.TestCase):
+    ANSWER = {"answers": {"seen": {"type": "choice", "choice": "package", "confidence": 0.8,
+                                   "probabilities": {"package": 0.834, "person": 0.1, "vehicle": 0.02,
+                                                     "animal": 0.02, "nothing": 0.026}}}}
+
+    def test_sends_one_choice_question_and_returns_the_top_option(self):
+        opener = FakeOpener(self.ANSWER)
+        d = DeciderClient({"DECIDER_URL": "http://box:9000/"}, opener).choose("state text", SEEN_QUESTION, SEEN_OPTIONS)
+        self.assertEqual((d["label"], d["p"]), ("package", 0.83))
+        self.assertEqual(set(d["probabilities"]), set(SEEN_OPTIONS))
         url, body, _ = opener.requests[0]
         self.assertEqual(url, "http://box:9000/v1/systemone")
-        self.assertEqual(body["state"], "state text")
-        self.assertEqual(body["questions"]["pkg"]["type"], "choice")
-        self.assertEqual(body["questions"]["pkg"]["criteria"], {"yes": "a box", "no": "the answer is no"})
+        self.assertEqual(body, {"state": "state text", "questions": {"seen": {
+            "type": "choice", "instructions": SEEN_QUESTION, "criteria": SEEN_OPTIONS}}})
 
     def test_any_failure_returns_none(self):
-        self.assertIsNone(DeciderClient({}, FakeOpener(error=ConnectionRefusedError("down")))("s", {"q": {"question": "?"}}))
-        self.assertIsNone(DeciderClient({}, FakeOpener({"answers": {}}))("s", {"q": {"question": "?"}}))
+        options = {"a": "first", "b": "second"}
+        self.assertIsNone(DeciderClient({}, FakeOpener(error=ConnectionRefusedError("down"))).choose("s", "?", options))
+        self.assertIsNone(DeciderClient({}, FakeOpener({"answers": {}})).choose("s", "?", options))
+        partial = FakeOpener({"answers": {"seen": {"probabilities": {"a": 0.9}}}})  # option b has no probability
+        self.assertIsNone(DeciderClient({}, partial).choose("s", "?", options))
+
+    def test_asks_one_question_at_a_time(self):
+        # The Decider server crashes on Apple MPS when two requests overlap (seen with the startup warm-up
+        # racing the first event), so a client never sends a second question before the first is answered.
+        state = {"now": 0, "most": 0}
+        lock = threading.Lock()
+
+        class SlowOpener:
+            def __call__(self, req, timeout):
+                with lock:
+                    state["now"] += 1
+                    state["most"] = max(state["most"], state["now"])
+                time.sleep(0.05)
+                with lock:
+                    state["now"] -= 1
+                return io.BytesIO(json.dumps(ChooseTest.ANSWER).encode())
+
+        client = DeciderClient({}, SlowOpener())
+        threads = [threading.Thread(target=client.choose, args=("s", SEEN_QUESTION, SEEN_OPTIONS)) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(state["most"], 1)
+
+    def test_default_timeout_is_30_seconds(self):
+        self.assertEqual(DeciderClient({}).timeout, 30)
+        self.assertEqual(DeciderClient({"DECIDER_TIMEOUT": "5"}).timeout, 5)
+
+    def test_shipped_question(self):
+        self.assertEqual(list(SEEN_OPTIONS), ["package", "person", "vehicle", "animal", "nothing"])
+        self.assertEqual(DEFAULT_MIN_P, 0.5)
+
+    def test_state_text(self):
+        self.assertEqual(state_text("Front Door", "23:30", True, "human", "A man stands at the door."),
+                         'Doorbell camera "Front Door" saw motion at 23:30 (night). Ring\'s label: human. '
+                         "AI description of the camera frame: A man stands at the door.")
+        self.assertIn("at 14:05 (day). Ring's label: none.", state_text("Back Yard", "14:05", False, None, "A cat."))
 
 
 if __name__ == "__main__":

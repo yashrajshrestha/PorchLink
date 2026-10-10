@@ -2,17 +2,23 @@
 """Local fake of the Ring Partner API, driven by a scenario file, with optional chaos (monkey testing).
 
 Matches what the real API did on 2026-10-05: JSON:API shapes, the snapshot body format and its error codes.
-motion_detected / button_press and their webhooks follow the Ring docs' event list; real webhook
-payloads were not observed, so their exact shape here is an assumption.
+motion_detected / button_press and their webhooks follow the Ring docs' event list.
+
+Webhooks use Ring's documented shape (data.type + attributes.source/timestamp/sub_type + meta.request_id)
+and are signed like Ring's: X-Signature: sha256=<HMAC-SHA256 of the raw body>. Chaos also re-delivers the
+same request and sends forged (wrongly signed) webhooks, which the app must refuse.
 
 Run:  python3 sim/fake_ring_server.py sim/scenarios/night_visit.json --speed 60 --chaos 0.2 \
           --webhook http://127.0.0.1:8080/webhook
-Then: RING_BASE_URL=http://127.0.0.1:9000 RING_TOKEN=sim-token python3 app.py
+Then: RING_WEBHOOK_SECRET=sim-secret RING_BASE_URL=http://127.0.0.1:9000 RING_TOKEN=sim-token python3 app.py
 """
-import argparse, json, os, random, threading, time, urllib.request
-from datetime import datetime
+import argparse, json, os, random, sys, threading, time, urllib.error, urllib.request
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # run as a script from anywhere
+from webhooks import sign  # noqa: E402
 
 WEBHOOK_TYPES = {"motion_detected", "button_press"}
 
@@ -39,13 +45,14 @@ class FakeRing:
         for i, e in enumerate(sorted(data["events"], key=lambda e: e["at_s"])):
             start = self.base_ms + int(e["at_s"] * 1000)
             image = os.path.normpath(os.path.join(here, e["image"])) if e.get("image") else None
-            self.events.append({**e, "id": f"sim.event.{i}", "start": start,
+            self.events.append({**e, "id": f"sim.event.{i}", "request_id": f"sim-req-{i}", "start": start,
                                 "end": start + int(e.get("duration_s", 20) * 1000), "image_path": image})
         self.speed, self.chaos, self.token = speed, chaos, token
         self.redirect_media = redirect_media  # answer snapshots with 303 -> pre-signed-style URL
         self.started, self.token_ttl = time.time(), token_ttl
         self.rand = random.Random(seed)
         self.webhooks_sent = set()
+        self.injected_failures = 0
 
     # --- scenario clock -------------------------------------------------
     def released(self):
@@ -62,8 +69,29 @@ class FakeRing:
                 "relationships": {"cv_detections": {"data": []},
                                   "source": {"data": {"type": "devices", "id": e["device"]}}}}
 
-    def webhook_payload(self, e):
-        return {"data": {**self.history_json(e), "type": e["type"]}}
+    @staticmethod
+    def webhook_payload(e):
+        """Ring's documented webhook shape. request_id is stable per event, so a re-delivery is a true duplicate."""
+        attrs = {"source": e["device"], "source_type": "devices", "timestamp": e["start"], "component_ids": ["0"]}
+        if e.get("sub_type"):
+            attrs["sub_type"] = e["sub_type"]
+        sent = datetime.fromtimestamp(e["start"] / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"data": {"type": e["type"], "attributes": attrs},
+                "meta": {"version": "1.0", "time": sent, "request_id": e["request_id"], "account_id": "sim.account"}}
+
+    def deliveries(self, e, secret):
+        """What gets POSTed for one event: (body, X-Signature, forged). Chaos adds Ring-style re-deliveries
+        of the same body and forged webhooks signed with the wrong key."""
+        body = json.dumps(self.webhook_payload(e)).encode()
+        out = [(body, sign(secret, body), False)]
+        if self.chaos and self.rand.random() < self.chaos:
+            out.append((body, sign(secret, body), False))
+        if self.chaos and self.rand.random() < self.chaos:
+            forged = self.webhook_payload(e)
+            forged["meta"] = {**forged["meta"], "request_id": f"forged-{self.rand.randrange(10**9)}"}
+            forged_body = json.dumps(forged).encode()
+            out.append((forged_body, sign("not-the-ring-key", forged_body), True))
+        return out
 
     # --- request handling (returns status, body, content_type) ----------
     def handle(self, method, path, headers, body):
@@ -82,6 +110,7 @@ class FakeRing:
         if self.chaos and self.rand.random() < self.chaos:
             roll = self.rand.random()
             if roll < 0.4:
+                self.injected_failures += 1
                 return (*error(500, "INTERNAL_ERROR", "chaos: injected failure"), None)
             if roll < 0.7:
                 time.sleep(self.rand.uniform(0.5, 2.0))  # chaos: slow reply, then answer normally
@@ -134,15 +163,16 @@ class FakeRing:
         self.webhooks_sent.update(e["id"] for e in due)
         return due
 
-    def push_webhooks(self, url, stop):
+    def push_webhooks(self, url, stop, secret):
         while not stop.is_set():
             for e in self.due_webhooks():
-                copies = 2 if self.chaos and self.rand.random() < self.chaos else 1  # chaos: duplicate delivery
-                for _ in range(copies):
+                for body, signature, forged in self.deliveries(e, secret):
+                    req = urllib.request.Request(url, data=body, method="POST", headers={
+                        "Content-Type": "application/json", "X-Signature": signature})
                     try:
-                        req = urllib.request.Request(url, data=json.dumps(self.webhook_payload(e)).encode(),
-                                                     headers={"Content-Type": "application/json"}, method="POST")
                         urllib.request.urlopen(req, timeout=5).read()
+                    except urllib.error.HTTPError as ex:
+                        print(f"{'forged webhook refused' if forged else 'webhook rejected'}: HTTP {ex.code}")
                     except Exception as ex:
                         print(f"webhook to {url} failed: {ex}")
             stop.wait(0.5)
@@ -186,13 +216,15 @@ def main():
     p.add_argument("--token", default="sim-token")
     p.add_argument("--token-ttl", type=int, default=1800, help="real seconds until every call returns 401")
     p.add_argument("--webhook", help="URL to POST motion_detected / button_press webhooks to")
+    p.add_argument("--webhook-secret", default=os.environ.get("RING_WEBHOOK_SECRET") or "sim-secret",
+                   help="HMAC key used to sign webhooks (the app's RING_WEBHOOK_SECRET)")
     p.add_argument("--seed", type=int)
     p.add_argument("--redirect-media", action="store_true", help="answer snapshots with a 303 redirect")
     a = p.parse_args()
     fake = FakeRing(a.scenario, a.speed, a.chaos, a.token, a.token_ttl, a.seed, a.redirect_media)
     stop = threading.Event()
     if a.webhook:
-        threading.Thread(target=fake.push_webhooks, args=(a.webhook, stop), daemon=True).start()
+        threading.Thread(target=fake.push_webhooks, args=(a.webhook, stop, a.webhook_secret), daemon=True).start()
     last = fake.events[-1]["at_s"] / a.speed if fake.events else 0
     print(f"Fake Ring API on http://127.0.0.1:{a.port} | token '{a.token}' | {len(fake.events)} events over "
           f"{last:.0f}s real time | chaos {a.chaos} | webhooks {'-> ' + a.webhook if a.webhook else 'off'}")
