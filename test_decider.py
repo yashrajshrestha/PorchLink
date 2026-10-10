@@ -1,5 +1,5 @@
 """Tests for the Strands Decider HTTP client (no server needed). Run: python3 -m unittest test_decider -v"""
-import io, json, unittest
+import io, json, threading, time, unittest
 
 from decider import DEFAULT_MIN_P, SEEN_OPTIONS, SEEN_QUESTION, DeciderClient, state_text
 
@@ -36,6 +36,30 @@ class ChooseTest(unittest.TestCase):
         self.assertIsNone(DeciderClient({}, FakeOpener({"answers": {}})).choose("s", "?", options))
         partial = FakeOpener({"answers": {"seen": {"probabilities": {"a": 0.9}}}})  # option b has no probability
         self.assertIsNone(DeciderClient({}, partial).choose("s", "?", options))
+
+    def test_asks_one_question_at_a_time(self):
+        # The Decider server crashes on Apple MPS when two requests overlap (seen with the startup warm-up
+        # racing the first event), so a client never sends a second question before the first is answered.
+        state = {"now": 0, "most": 0}
+        lock = threading.Lock()
+
+        class SlowOpener:
+            def __call__(self, req, timeout):
+                with lock:
+                    state["now"] += 1
+                    state["most"] = max(state["most"], state["now"])
+                time.sleep(0.05)
+                with lock:
+                    state["now"] -= 1
+                return io.BytesIO(json.dumps(ChooseTest.ANSWER).encode())
+
+        client = DeciderClient({}, SlowOpener())
+        threads = [threading.Thread(target=client.choose, args=("s", SEEN_QUESTION, SEEN_OPTIONS)) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(state["most"], 1)
 
     def test_default_timeout_is_30_seconds(self):
         self.assertEqual(DeciderClient({}).timeout, 30)

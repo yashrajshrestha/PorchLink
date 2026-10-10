@@ -4,7 +4,7 @@ Optional: enabled with DECIDER_ENABLED=1. Start the server separately (see READM
 only, so PorchLink itself does not need torch. Any failure returns None and the bridge falls back
 to keyword matching.
 """
-import json, urllib.request
+import json, threading, urllib.request
 
 DEFAULT_MIN_P = 0.5  # top-option p below this means "not sure"; chosen by the probe in the 2026-10-08 Decider spec
 SEEN_QUESTION = "What is at the door in this camera frame?"
@@ -28,6 +28,7 @@ class DeciderClient:
         self.url = env.get("DECIDER_URL", "http://127.0.0.1:8000").rstrip("/") + "/v1/systemone"
         self.timeout = float(env.get("DECIDER_TIMEOUT", 30))  # one worker thread: a slow call delays later events; MPS about 0.4 s, CPU 7-17 s
         self.opener = opener
+        self.lock = threading.Lock()  # one question at a time: overlapping requests crash the server on Apple MPS
 
     def choose(self, state, instructions, options):
         """Ask one multiple-choice question ({option: criterion}). Returns the most likely option as
@@ -35,7 +36,7 @@ class DeciderClient:
         body = {"state": state, "questions": {"seen": {"type": "choice", "instructions": instructions, "criteria": options}}}
         req = urllib.request.Request(self.url, json.dumps(body).encode(), {"Content-Type": "application/json"})
         try:
-            with self.opener(req, timeout=self.timeout) as resp:
+            with self.lock, self.opener(req, timeout=self.timeout) as resp:
                 probs = json.loads(resp.read())["answers"]["seen"]["probabilities"]
             probs = {name: float(probs[name]) for name in options}
         except Exception as e:
